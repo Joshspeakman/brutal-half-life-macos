@@ -4,6 +4,7 @@
   "modules": {
     "hl.dll": {"member": "dlls/hl.dll", "sha256": "4bbfddc1e81e8b366f5488268a33707ff132d8b020577331a2fb1ef3673e53ad"},
     "client.dll": {"member": "cl_dlls/client.dll", "sha256": "4ec5dc997ec953e311c0a7c2414d6850f7f1489d004c7eceaaf2449dd516752b"},
-    "fmod.dll": {"member": "cl_dlls/fmod.dll", "sha256": "cd9c02f7db6fd6c9292ae49cc0275900e1a4e11d52e1650782c58ef663d00ef0"}
+    "fmod.dll": {"member": "cl_dlls/fmod.dll", "sha256": "cd9c02f7db6fd6c9292ae49cc0275900e1a4e11d52e1650782c58ef663d00ef0"},
+    "vgui.dll": {"sdk_repository": "https://github.com/FWGS/vgui-dev.git", "sdk_revision": "e1cc1d9c2d7136672ef4d3edc72123555da2fcbf", "sdk_path": "lib/win32_vc16/vgui.dll", "sha256": "63f6a66e71814e848b7875963b22b2518a49a433110fa9663ffc84f1a78ec475"}
   }
 }

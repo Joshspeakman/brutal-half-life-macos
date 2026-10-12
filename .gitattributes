@@ -1,0 +1,2 @@
+# Preserve this pinned upstream mapping byte-for-byte, including CRLF.
+vendor/nls/bestfit1252.txt -text -whitespace

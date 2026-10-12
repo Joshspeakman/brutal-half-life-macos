@@ -1,57 +1,68 @@
 # Brutal Half-Life v3 native recompilation
 
-A local research project to translate the original v3 Windows x86 game
-modules into native Apple Silicon code and connect them to a native engine.
-This project is **not playable yet**. It currently builds and tests four
-original server interface functions as ARM64 code, without Wine or Rosetta.
+Local development of an Apple Silicon port using the original v3 modules.
+**This is not a playable app yet.** The server loads the intro map and runs
+frames. The client reaches HUD initialization, where FMOD currently stops
+at a missing Windows mixer adapter.
 
-The implementation uses an x86-to-C static recompiler and a 32-bit guest
-address space. Clang compiles the generated C to ARM64. Unicorn executes
-the original x86 instructions only as a development test oracle; it is not
-part of the native runtime. The 2017 BHL source is reference material, not
-a substitute for the downloaded v3 behavior.
+Original x86 instructions are translated to C and compiled to ARM64. The
+runtime uses a 32-bit guest address space and explicit adapters to native
+Xash3D. Wine and Rosetta are not used. Unicorn executes original instructions
+only for development comparisons.
 
-## First milestone
+## Reproduce the development build
 
-On an Apple Silicon Mac with Python 3 and Xcode Command Line Tools:
+Requirements: Apple Silicon, Xcode Command Line Tools, Python 3, Git,
+`pkg-config`, SDL2 development files and UPX. For Homebrew dependencies:
 
 ```sh
+brew install pkg-config sdl2 upx
 ./bootstrap.sh /path/to/bhl_v3.zip
+.venv/bin/python tools/build_project.py \
+  --archive /path/to/bhl_v3.zip \
+  --valve /path/to/owned/Half-Life/valve \
+  --check
 ```
 
-This verifies the three original DLL hashes, inventories their interfaces,
-prepares relocated server/client copies, recompiles the server interface
-exports and compares them with the original code. All binaries, generated
-translations and reports stay in ignored `work/`. Original downloads,
-installed games and saves are never modified by these tools.
+Bootstrap creates the pinned Python environment and runs the small interface
+proof. The project builder verifies the archive, fetches pinned engine/SDK
+dependencies, unpacks FMOD, relocates and translates all four modules, builds
+both bridges and stages an isolated session. First-time translation takes
+longer than incremental builds.
 
-The native library is `work/probe/libbhl_interfaces.dylib`. The test performs
-1,000 deterministic comparisons across `GetEntityAPI`, `GetEntityAPI2`,
-`GetNewDLLFunctions` and `GiveFnptrsToDll`. It compares integer registers,
-defined flags, XMM registers and all writable image/stack/scratch bytes.
-Inputs cover accepted/rejected versions, null output tables, unaligned
-destinations and randomized engine-table contents. Invalid version-pointer
-arguments are outside this test's supported calling contract.
+All input copies, third-party checkouts, generated game code, binaries and
+reports stay in ignored `work/`. Source game folders and saves are unchanged.
+A build does not install or publish an application.
 
-Passing these tests does not validate DLL initialization, engine callbacks,
-entity layout, weapons, maps, rendering, audio or save compatibility.
+## Verified progress
 
-## Analysis and translation audit
+| Area | Evidence |
+|---|---|
+| Translation | 10,387 discovered functions and 1,009 imports link as ARM64; untested paths can still trap |
+| Server interface | Four exports pass 1,000 deterministic x86/ARM64 comparisons |
+| DLL startup | Server, client, FMOD and SDK VGUI complete process attach |
+| Startup comparisons | 990 API boundaries match integer registers and writable memory |
+| Native services | Tests cover codepages, heap ownership, recursive locks, file I/O and explicit missing-call failures |
+| Server integration | GameInit, movement initialization and three delta encoders run through native callbacks |
+| Headless map | `c0a0` activates and completes at least ten server frames in a bounded session |
+| Client integration | Initialize, weapon-event registration and movement initialization pass in the full engine with a null renderer |
+| Complete conversion | Pending: audio output, VGUI drawing, rendering, player movement, save/load and campaign QA |
 
-After bootstrap:
+Startup comparisons share the native OS-service model. They validate the
+translation, **not Windows API equivalence**. Null rendering and dummy audio
+cannot validate graphics or audible output. Adapter counts are not gameplay
+coverage.
+
+Reproduce the current client failure after building:
 
 ```sh
-.venv/bin/python vendor/lifter/analyze.py work/inputs/hl.dll work/reports/server-analysis.json
-.venv/bin/python tools/lift_module.py hl.dll work/reports/server-analysis.json --check-c
+.venv/bin/python tests/test_client_engine.py --trace
 ```
 
-The initial server scan discovers 4,082 candidate functions. This is heuristic
-disassembly, not a count of verified routines. All 41 generated C files pass
-Clang's ARM64 syntax check. Generated whole-module code
-still contains explicit traps for unsupported instructions and unresolved
-control flow. The translation audit is not linked into the four-function
-probe, and it must not be labeled a working server.
+This acceptance test currently fails at FMOD's mixer call. Its report is
+`work/reports/client-engine.json`. Faults must be resolved before claiming
+client integration is complete.
 
-See [the port plan](docs/PORT.md) for module boundaries, outstanding work and
-acceptance criteria. [NOTICE.txt](NOTICE.txt) records recompiler provenance.
-No mod/game binaries, assets, generated game code or saves belong in Git.
+See [port status and acceptance criteria](docs/PORT.md) and
+[dependency provenance](NOTICE.txt). Original assets and generated game code
+must never be committed.

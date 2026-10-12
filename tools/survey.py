@@ -40,7 +40,7 @@ def inspect(name):
 
 
 def main():
-    report = {name: inspect(name) for name in PROFILE["modules"]}
+    report = {name: inspect(name) for name in PROFILE["modules"] if (ROOT/'work/inputs'/name).exists()}
     out = ROOT / "work/reports"
     out.mkdir(parents=True, exist_ok=True)
     (out / "modules.json").write_text(json.dumps(report, indent=2) + "\n")

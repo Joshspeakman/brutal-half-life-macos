@@ -277,12 +277,12 @@ uint8_t *rt_test_mem(void)
 int rt_test_run(Ctx *c, uint32_t fn_addr, uint32_t *pc, const char **what)
 {
     GuestFn fn = rt_lookup(fn_addr);
-    if (!fn) { *pc = fn_addr; *what = "no such function"; return 2; }
-    jmp_buf jb; fault_jmp = &jb;
-    if (setjmp(jb)) { fault_jmp = 0; rt_fpcr_sync(0x27f); *pc = fault_pc; *what = fault_what; return 1; }
+    if (!fn && fn_addr < RT_IMPORT_BASE) { *pc = fn_addr; *what = "no such function"; return 2; }
+    jmp_buf jb; jmp_buf *previous = fault_jmp; fault_jmp = &jb;
+    if (setjmp(jb)) { fault_jmp = previous; rt_fpcr_sync(0x27f); *pc = fault_pc; *what = fault_what; return 1; }
     rt_fpcr_sync(c->fcw);
-    fn(c);
-    fault_jmp = 0; rt_fpcr_sync(0x27f); return 0;   /* the caller's (Python's) rounding back */
+    if(fn)fn(c);else rt_call(c,fn_addr);
+    fault_jmp = previous; rt_fpcr_sync(0x27f); return 0;   /* the caller's rounding back */
 }
 uint32_t rt_test_flags(const Ctx *c) { return flags_get(&c->f); }
 

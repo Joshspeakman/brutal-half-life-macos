@@ -14,6 +14,8 @@ def main():
     with zipfile.ZipFile(args.archive) as archive:
         payloads = {}
         for name, spec in PROFILE["modules"].items():
+            if "member" not in spec:
+                continue
             payload = archive.read(spec["member"])
             actual = hashlib.sha256(payload).hexdigest()
             if actual != spec["sha256"]:

@@ -8,3 +8,21 @@ Runtime changes remove unrelated game profiles. No original game or mod
 code/assets, generated translations, engine binaries or saves are included.
 Brutal Half-Life and Half-Life remain owned by their respective authors.
 Unicorn is a development reference oracle, not the native runtime.
+
+Development scripts fetch https://github.com/FWGS/xash3d-fwgs at
+fd0cd6afdda9dff94346af60884b99876001ca5f into ignored work/upstream/.
+Engine and SDK headers retain their upstream notices and licensing terms.
+The source tree and generated interface declarations are not vendored.
+
+The VGUI SDK dependency is fetched from https://github.com/FWGS/vgui-dev at
+e1cc1d9c2d7136672ef4d3edc72123555da2fcbf. Its binary and translated code stay
+in ignored work/. The upstream SDK license applies to that input.
+
+vendor/nls/bestfit1252.txt is Microsoft's codepage mapping published at
+https://www.unicode.org/Public/MAPPINGS/VENDORS/MICSFT/WindowsBestFit/bestfit1252.txt
+(SHA256 72ea23c939c5b26fae7aded0207b327e2f3902d7d3c168d7087f5cfc38ee76a9).
+The Unicode License V3 is retained in vendor/nls/LICENSE.txt.
+
+SDL2 is linked from the developer's installed library. UPX is a preparation
+tool, not a runtime dependency. No engine/audio/GUI binaries are distributed
+by this repository.
