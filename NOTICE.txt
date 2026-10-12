@@ -1,0 +1,10 @@
+Brutal Half-Life native recompilation research
+
+The x86-to-C lifter and runtime originate from the shared game-port
+recompiler, imported from its Sims 2 source snapshot
+6da636d6d742bb1b1f4293b6f6696cf389aa8db7.
+Its MIT license is retained in vendor/LICENSE-recompiler.
+Runtime changes remove unrelated game profiles. No original game or mod
+code/assets, generated translations, engine binaries or saves are included.
+Brutal Half-Life and Half-Life remain owned by their respective authors.
+Unicorn is a development reference oracle, not the native runtime.

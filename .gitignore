@@ -1,0 +1,16 @@
+/work/
+/.venv/
+__pycache__/
+*.pyc
+.DS_Store
+*.dll
+*.exe
+*.dylib
+*.so
+*.o
+*.zip
+*.pak
+*.wad
+*.mdl
+*.bsp
+*.sav
