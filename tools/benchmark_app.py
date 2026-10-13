@@ -29,7 +29,11 @@ def main():
     ap.add_argument('--width',type=int,default=1280);ap.add_argument('--height',type=int,default=720)
     ap.add_argument('--fps-cap',type=int,default=1000);ap.add_argument('--vsync',action='store_true')
     ap.add_argument('--fullscreen',action='store_true',help='Show a native fullscreen window for an interactive-display measurement')
+    ap.add_argument('--audio',choices=['dummy','coreaudio'],default='dummy',help='Use CoreAudio for a measurement with real device output')
+    ap.add_argument('--real-time',action='store_true',help='Use normal elapsed simulation time instead of the matched fixed step')
     ap.add_argument('--attack',action='store_true');ap.add_argument('--bridge-profile',action='store_true')
+    ap.add_argument('--verify-entities',action='store_true',help='Audit untouched mirrors for untracked writes; not a timing run')
+    ap.add_argument('--eager-entities',action='store_true',help='Use complete mirror scans as a synchronization comparison control')
     ap.add_argument('--capture',action='store_true',help='Capture the scene after timing stops')
     ap.add_argument('--name',required=True);ap.add_argument('--seconds',type=int,default=180)
     args=ap.parse_args()
@@ -57,30 +61,36 @@ def main():
     capture=data/'bhl/scrshots/native-benchmark.png'
     if args.capture:capture.unlink(missing_ok=True)
     screenshot=wait*3+'snapshot scrshots/native-benchmark.png\n'+wait*3 if args.capture else ''
+    # Xash accepts a frame count for wait. Keep the original short-run script
+    # for matched comparisons, but avoid overflowing its 32 KiB command buffer
+    # when a soak requests many thousands of frames.
+    measured_wait=wait*args.frames if args.frames<=4096 else f'wait {args.frames}\n'
     script.write_text('scr_conspeed 100000\ndeveloper 0\n'+wait*120+setup+wait*30+
-                      'vid_info\necho BHL_BENCH_BEGIN\n'+wait*args.frames+'echo BHL_BENCH_END\n-attack\n'+screenshot+'quit\n')
+                      'vid_info\necho BHL_BENCH_BEGIN\n'+measured_wait+'echo BHL_BENCH_END\n-attack\n'+screenshot+'quit\n')
     env={k:v for k,v in os.environ.items() if not k.startswith(('BHL_','SDL_','DYLD_','XASH3D_'))}
     overrides=[p.resolve().parent for p in (args.core,args.client,args.server,args.engine) if p]
     env.update(BHL_IMAGE_DIR=str(resources/'Images'),XASH3D_BASEDIR=str(data),XASH3D_EXTRAS_PAK1=str(resources/'extras.pk3'),
                DYLD_LIBRARY_PATH=':'.join(map(str,dict.fromkeys(overrides+[runtime]))),DYLD_PRINT_LIBRARIES='1',
-               DYLD_INSERT_LIBRARIES=str(probe),SDL_AUDIODRIVER='dummy',BHL_BENCH_GATE=str(gate),BHL_BENCH_TIMES=str(timings))
+               DYLD_INSERT_LIBRARIES=str(probe),SDL_AUDIODRIVER=args.audio,BHL_BENCH_GATE=str(gate),BHL_BENCH_TIMES=str(timings))
     env['SDL_VIDEO_MAC_FULLSCREEN_SPACES']='1'
     if args.bridge_profile:env['BHL_BRIDGE_PROFILE']='1'
+    if args.eager_entities:env['BHL_EAGER_ENTITIES']='1'
+    if args.verify_entities:env['BHL_VERIFY_ENTITY_ACCESS']='1'
     if args.renderer=='metal':
         env.update(SDL_EGL_LIBRARY=str(runtime/'libEGL.dylib'),SDL_OPENGL_LIBRARY=str(runtime/'libGLESv2.dylib'),ANGLE_DEFAULT_PLATFORM='metal')
     command=[str(args.app.resolve()/'Contents/MacOS/BrutalHalfLife'),'--run-engine','-game','bhl','-ref',args.renderer,'-dll',str((args.server or runtime/'hl_arm64.dylib').resolve()),
              '-clientlib',str((args.client or runtime/'client_arm64.dylib').resolve()),'-menulib',str(runtime/'libmenu.dylib'),
              *(['-borderless'] if args.fullscreen else ['-hidden','-windowed']),'-nomouse','-width',str(args.width),'-height',str(args.height),'-noip','-noip6','-nomaster',
              '-nowriteconfig','-dev','3','+sv_lan','1','+cl_lw','0','+fps_max',str(args.fps_cap),'+gl_vsync',str(int(args.vsync)),
-             '+host_framerate','0.008333333','+map',args.map,'+exec',script.name]
+             '+host_framerate','0' if args.real_time else '0.008333333','+map',args.map,'+exec',script.name]
     if args.renderer=='metal':command.insert(2,'-metal')
     began=time.monotonic();marks={};timeout=False;pending=b''
     expected=[args.core or runtime/'libbhl.dylib',args.client or runtime/'client_arm64.dylib',
               args.server or runtime/'hl_arm64.dylib',args.engine or runtime/'libxash.dylib',
               runtime/f'libref_{args.renderer}.dylib']
     if args.renderer=='metal':expected += [runtime/'libEGL.dylib',runtime/'libGLESv2.dylib']
-    report=dict(map=args.map,renderer=args.renderer,frames=args.frames,logical_size=[args.width,args.height],fixed_simulation_step=1/120,
-                fps_cap=args.fps_cap,vsync=args.vsync,fullscreen=args.fullscreen,audio='dummy',attack=args.attack,profiling=args.bridge_profile,
+    report=dict(map=args.map,renderer=args.renderer,frames=args.frames,logical_size=[args.width,args.height],fixed_simulation_step=None if args.real_time else 1/120,
+                fps_cap=args.fps_cap,vsync=args.vsync,fullscreen=args.fullscreen,audio=args.audio,attack=args.attack,profiling=args.bridge_profile,eager_entities=args.eager_entities,verify_entities=args.verify_entities,
                 libraries={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in expected})
     p=None
     try:
@@ -118,11 +128,12 @@ def main():
     report['library_paths_verified']=all(loaded.get(p.name)==p.resolve() for p in expected)
     report['runtime_failures']=[line for line in log.splitlines() if re.search(r'BHL.*(unimplemented|not implemented)|Crash:|Xash Error:|BHL native loader:|Host_Error:',line)]
     report['god_enabled']='godmode ON' in log
+    report['audio_verified']=f'Using SDL audio driver: {args.audio} @' in log and f'BHL native audio: SDL {args.audio},' in log
     interval=re.search(r'BHL_BENCH_SWAP_INTERVAL (-?\d+)',log)
     report['swap_interval']=int(interval[1]) if interval else None
     report['presented_intervals']=len(values)
     report['passed']=report['returncode']==0 and not timeout and len(marks)==2 and abs(len(values)-args.frames)<=4 and report['library_paths_verified'] and not report['runtime_failures'] and report['god_enabled']
-    report['passed']=report['passed'] and report['swap_interval']==int(args.vsync)
+    report['passed']=report['passed'] and report['swap_interval']==int(args.vsync) and report['audio_verified']
     if args.renderer=='metal':
         report['metal_verified']='BHL Metal backend verified: ANGLE' in log and 'BHL Metal device verified: EGL_ANGLE_device_metal' in log
         report['passed']=report['passed'] and report['metal_verified']

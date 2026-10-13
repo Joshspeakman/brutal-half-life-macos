@@ -14,6 +14,7 @@ def main():
         exe=out/side
         command=['clang','-arch','arm64','-std=gnu11','-O2','-g','-Wno-c2x-extensions']
         for include in includes:command+=['-I',str(include)]
+        command+=[str(ROOT/'tests/watched_access_fixture.c')]
         command+=[str(ROOT/f'tests/{side}_boundary_fixture.c'),'-L',str(ROOT/'work/native'),'-lbhl','-Wl,-rpath,@executable_path/../native','-o',str(exe)]
         subprocess.run(command,check=True)
         result=subprocess.run([str(exe)],env=dict(os.environ,BHL_IMAGE_DIR=str(ROOT/'work/images')),stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=15)

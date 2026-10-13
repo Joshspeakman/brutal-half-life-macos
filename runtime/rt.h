@@ -26,6 +26,8 @@ static inline double rt_fscale(double value, double exponent) {
     return ldexp(value, n);
 }
 
+#include "memory_watch.h"
+
 extern uint8_t *G_MEM;                         /* guest address 0 */
 
 typedef struct LFs { uint32_t op, a, b, r, cin, eflags, df; } LFs;
@@ -55,30 +57,30 @@ typedef struct Ctx {
 #ifdef RT_TSO
 #define RT_ALD(T, p) __atomic_load_n((const T *)(p), __ATOMIC_ACQUIRE)
 #define RT_AST(T, p, v) __atomic_store_n((T *)(p), (v), __ATOMIC_RELEASE)
-static inline uint32_t rt_r8 (const uint8_t *M, uint32_t a) { return RT_ALD(uint8_t, M + a); }
-static inline uint32_t rt_r16(const uint8_t *M, uint32_t a) { const uint8_t *p = M + a; if (!((uintptr_t)p & 1)) return RT_ALD(uint16_t, p);
+static inline uint32_t rt_r8 (const uint8_t *M, uint32_t a) { rt_watch_memory(a,1); return RT_ALD(uint8_t, M + a); }
+static inline uint32_t rt_r16(const uint8_t *M, uint32_t a) { rt_watch_memory(a,2); const uint8_t *p = M + a; if (!((uintptr_t)p & 1)) return RT_ALD(uint16_t, p);
                                                                uint16_t v; memcpy(&v, p, 2); __atomic_thread_fence(__ATOMIC_ACQUIRE); return v; }
-static inline uint32_t rt_r32(const uint8_t *M, uint32_t a) { const uint8_t *p = M + a; if (!((uintptr_t)p & 3)) return RT_ALD(uint32_t, p);
+static inline uint32_t rt_r32(const uint8_t *M, uint32_t a) { rt_watch_memory(a,4); const uint8_t *p = M + a; if (!((uintptr_t)p & 3)) return RT_ALD(uint32_t, p);
                                                                uint32_t v; memcpy(&v, p, 4); __atomic_thread_fence(__ATOMIC_ACQUIRE); return v; }
-static inline void rt_w8 (uint8_t *M, uint32_t a, uint32_t v) { RT_AST(uint8_t, M + a, (uint8_t)v); }
-static inline void rt_w16(uint8_t *M, uint32_t a, uint32_t v) { uint8_t *p = M + a; uint16_t x = (uint16_t)v; if (!((uintptr_t)p & 1)) { RT_AST(uint16_t, p, x); return; }
+static inline void rt_w8 (uint8_t *M, uint32_t a, uint32_t v) { rt_watch_memory(a,1); RT_AST(uint8_t, M + a, (uint8_t)v); }
+static inline void rt_w16(uint8_t *M, uint32_t a, uint32_t v) { rt_watch_memory(a,2); uint8_t *p = M + a; uint16_t x = (uint16_t)v; if (!((uintptr_t)p & 1)) { RT_AST(uint16_t, p, x); return; }
                                                                  __atomic_thread_fence(__ATOMIC_RELEASE); memcpy(p, &x, 2); }
-static inline void rt_w32(uint8_t *M, uint32_t a, uint32_t v) { uint8_t *p = M + a; if (!((uintptr_t)p & 3)) { RT_AST(uint32_t, p, v); return; }
+static inline void rt_w32(uint8_t *M, uint32_t a, uint32_t v) { rt_watch_memory(a,4); uint8_t *p = M + a; if (!((uintptr_t)p & 3)) { RT_AST(uint32_t, p, v); return; }
                                                                  __atomic_thread_fence(__ATOMIC_RELEASE); memcpy(p, &v, 4); }
 #else
-static inline uint32_t rt_r8 (const uint8_t *M, uint32_t a) { return M[a]; }
-static inline uint32_t rt_r16(const uint8_t *M, uint32_t a) { uint16_t v; memcpy(&v, M + a, 2); return v; }
-static inline uint32_t rt_r32(const uint8_t *M, uint32_t a) { uint32_t v; memcpy(&v, M + a, 4); return v; }
-static inline void rt_w8 (uint8_t *M, uint32_t a, uint32_t v) { M[a] = (uint8_t)v; }
-static inline void rt_w16(uint8_t *M, uint32_t a, uint32_t v) { uint16_t x = (uint16_t)v; memcpy(M + a, &x, 2); }
-static inline void rt_w32(uint8_t *M, uint32_t a, uint32_t v) { memcpy(M + a, &v, 4); }
+static inline uint32_t rt_r8 (const uint8_t *M, uint32_t a) { rt_watch_memory(a,1); return M[a]; }
+static inline uint32_t rt_r16(const uint8_t *M, uint32_t a) { rt_watch_memory(a,2); uint16_t v; memcpy(&v, M + a, 2); return v; }
+static inline uint32_t rt_r32(const uint8_t *M, uint32_t a) { rt_watch_memory(a,4); uint32_t v; memcpy(&v, M + a, 4); return v; }
+static inline void rt_w8 (uint8_t *M, uint32_t a, uint32_t v) { rt_watch_memory(a,1); M[a] = (uint8_t)v; }
+static inline void rt_w16(uint8_t *M, uint32_t a, uint32_t v) { rt_watch_memory(a,2); uint16_t x = (uint16_t)v; memcpy(M + a, &x, 2); }
+static inline void rt_w32(uint8_t *M, uint32_t a, uint32_t v) { rt_watch_memory(a,4); memcpy(M + a, &v, 4); }
 #endif
-static inline uint64_t rt_r64(const uint8_t *M, uint32_t a) { uint64_t v; memcpy(&v, M + a, 8); return v; }
-static inline float    rt_rf32(const uint8_t *M, uint32_t a) { float v; memcpy(&v, M + a, 4); return v; }
-static inline double   rt_rf64(const uint8_t *M, uint32_t a) { double v; memcpy(&v, M + a, 8); return v; }
-static inline void rt_w64(uint8_t *M, uint32_t a, uint64_t v) { memcpy(M + a, &v, 8); }
-static inline void rt_wf32(uint8_t *M, uint32_t a, float v) { memcpy(M + a, &v, 4); }
-static inline void rt_wf64(uint8_t *M, uint32_t a, double v) { memcpy(M + a, &v, 8); }
+static inline uint64_t rt_r64(const uint8_t *M, uint32_t a) { rt_watch_memory(a,8); uint64_t v; memcpy(&v, M + a, 8); return v; }
+static inline float    rt_rf32(const uint8_t *M, uint32_t a) { rt_watch_memory(a,4); float v; memcpy(&v, M + a, 4); return v; }
+static inline double   rt_rf64(const uint8_t *M, uint32_t a) { rt_watch_memory(a,8); double v; memcpy(&v, M + a, 8); return v; }
+static inline void rt_w64(uint8_t *M, uint32_t a, uint64_t v) { rt_watch_memory(a,8); memcpy(M + a, &v, 8); }
+static inline void rt_wf32(uint8_t *M, uint32_t a, float v) { rt_watch_memory(a,4); memcpy(M + a, &v, 4); }
+static inline void rt_wf64(uint8_t *M, uint32_t a, double v) { rt_watch_memory(a,8); memcpy(M + a, &v, 8); }
 #define R8(a)      rt_r8(M, (uint32_t)(a))
 #define R16(a)     rt_r16(M, (uint32_t)(a))
 #define R32(a)     rt_r32(M, (uint32_t)(a))
@@ -92,13 +94,17 @@ static inline void rt_wf64(uint8_t *M, uint32_t a, double v) { memcpy(M + a, &v,
 #define WF32(a, v) rt_wf32(M, (uint32_t)(a), (v))
 #define WF64(a, v) rt_wf64(M, (uint32_t)(a), (v))
 /* this thread's own stack (lift.py stack()): plain accesses even under RT_TSO */
-static inline uint32_t rt_r32s(const uint8_t *M, uint32_t a) { uint32_t v; memcpy(&v, M + a, 4); return v; }
-static inline void rt_w32s(uint8_t *M, uint32_t a, uint32_t v) { memcpy(M + a, &v, 4); }
-#define R8S(a)     ((uint32_t)M[(uint32_t)(a)])
-#define R16S(a)    ({ uint16_t v_; memcpy(&v_, M + (uint32_t)(a), 2); (uint32_t)v_; })
+static inline uint32_t rt_r8s(const uint8_t *M, uint32_t a) { rt_watch_memory(a,1); return M[a]; }
+static inline uint32_t rt_r16s(const uint8_t *M, uint32_t a) { rt_watch_memory(a,2); uint16_t v; memcpy(&v, M + a, 2); return v; }
+static inline uint32_t rt_r32s(const uint8_t *M, uint32_t a) { rt_watch_memory(a,4); uint32_t v; memcpy(&v, M + a, 4); return v; }
+static inline void rt_w8s(uint8_t *M, uint32_t a, uint8_t v) { rt_watch_memory(a,1); M[a]=v; }
+static inline void rt_w16s(uint8_t *M, uint32_t a, uint16_t v) { rt_watch_memory(a,2); memcpy(M + a, &v, 2); }
+static inline void rt_w32s(uint8_t *M, uint32_t a, uint32_t v) { rt_watch_memory(a,4); memcpy(M + a, &v, 4); }
+#define R8S(a)     rt_r8s(M,(uint32_t)(a))
+#define R16S(a)    rt_r16s(M,(uint32_t)(a))
 #define R32S(a)    rt_r32s(M, (uint32_t)(a))
-#define W8S(a, v)  (M[(uint32_t)(a)] = (uint8_t)(v))
-#define W16S(a, v) ({ uint16_t v_ = (uint16_t)(v); memcpy(M + (uint32_t)(a), &v_, 2); })
+#define W8S(a, v)  rt_w8s(M,(uint32_t)(a),(v))
+#define W16S(a, v) rt_w16s(M,(uint32_t)(a),(v))
 #define W32S(a, v) rt_w32s(M, (uint32_t)(a), (v))
 
 /* ---- registers in locals ---- */
@@ -335,6 +341,7 @@ enum { RT_LADD, RT_LAND, RT_LOR, RT_LXOR };
 /* the old value; n = operand bytes (1, 2, 4) */
 static inline uint32_t rt_lock_rmw(uint8_t *M, uint32_t a, int n, int op, uint32_t v)
 {
+    rt_watch_memory(a,n);
     uint8_t *p = M + a;
     if (!((uintptr_t)p & (uintptr_t)(n - 1)))
         return n == 1 ? RT_LOCK_OP(uint8_t, p, op, v) : n == 2 ? RT_LOCK_OP(uint16_t, p, op, v) : RT_LOCK_OP(uint32_t, p, op, v);
@@ -346,6 +353,7 @@ static inline uint32_t rt_lock_rmw(uint8_t *M, uint32_t a, int n, int op, uint32
 }
 static inline uint32_t rt_lock_xchg(uint8_t *M, uint32_t a, int n, uint32_t v)
 {
+    rt_watch_memory(a,n);
     uint8_t *p = M + a;
     if (!((uintptr_t)p & (uintptr_t)(n - 1)))
         return n == 1 ? __atomic_exchange_n(p, (uint8_t)v, __ATOMIC_SEQ_CST) : n == 2 ? __atomic_exchange_n((uint16_t *)p, (uint16_t)v, __ATOMIC_SEQ_CST)
@@ -359,6 +367,7 @@ static inline uint32_t rt_lock_xchg(uint8_t *M, uint32_t a, int n, uint32_t v)
 /* 32-bit compare-exchange: the value found ([a] = v if it was exp) */
 static inline uint32_t rt_lock_cas(uint8_t *M, uint32_t a, uint32_t exp, uint32_t v)
 {
+    rt_watch_memory(a,4);
     uint8_t *p = M + a; uint32_t old = exp;
     if (!((uintptr_t)p & 3)) { (void)__atomic_compare_exchange_n((uint32_t *)p, &old, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); return old; }
     rt_bus_lock(); old = rt_r32(M, a); if (old == exp) rt_w32(M, a, v); rt_bus_unlock();

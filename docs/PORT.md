@@ -137,6 +137,18 @@ particle allocation tracking and measured results are described in
 [performance notes](PERFORMANCE.md). Full campaign performance validation
 remains necessary.
 
+Client entities, temporary-effect headers and server edicts now materialize on
+the first translated read or write in each callback scope. All translated
+scalar, stack, floating-point, SIMD, atomic and bulk memory helpers participate,
+so original code can retain pointers without relying on a fresh accessor call.
+Native callbacks publish accessed records and start a new scope on return.
+Unbounded borrowed pointers and native service imports restore full
+synchronization; pure scalar CRT math and bounded synchronous vector inputs
+retain the narrower scope. Stable guest identities survive native pool changes,
+including overlapping replacement pools. `BHL_VERIFY_ENTITY_ACCESS=1` audits
+untouched records for missed writes; `BHL_EAGER_ENTITIES=1` retains the full-scan
+comparison path. Neither option changes original effect counts or simulation.
+
 The server uses 159 engine entries, 50 game entries and five new-game entries.
 Guest globals/entvars/edicts are 172/676/804 bytes; native layouts differ.
 Entity pointers, string IDs, cvars, traces, private data and delta encoders
@@ -171,8 +183,8 @@ particle allocation identities prevent retired free-list entries from being
 traversed and stale guest writes from reaching recycled native slots.
 
 Local engine patches add `-hidden` for tests, expose particle allocation
-identities, honor the single-player frame cap with VSync, and implement the
-Metal/ANGLE path. Session staging
+identities, expose a model-table revision for safe missing-model caching, honor
+the single-player frame cap with VSync, and implement the Metal/ANGLE path. Session staging
 replaces Mach-O files atomically and takes a lock shared with engine tests, so
 a running test cannot have its executable overwritten. Each client run starts
 from the mod's shipped config (`cl_lw 0`); client weapon prediction with

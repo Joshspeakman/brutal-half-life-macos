@@ -54,18 +54,18 @@ def main():
     rows = []
     for i, meta in enumerate(metadata):
         pe = pefile.PE(str(ROOT / meta['binary']))
-        exports = [(s.name.decode(), meta['base']+s.address) for s in pe.DIRECTORY_ENTRY_EXPORT.symbols if s.name and not s.forwarder]
+        exports = sorted((s.name.decode(), meta['base']+s.address) for s in pe.DIRECTORY_ENTRY_EXPORT.symbols if s.name and not s.forwarder)
         description += f'static const BhlExport exports_{i}[] = {{\n'
         description += ''.join(f'{{{json.dumps(n)},0x{a:08x}u}},\n' for n,a in exports) + '};\n'
         rows.append(f'{{{json.dumps(meta["module"])},{json.dumps(meta["sha256"])},0x{meta["base"]:08x}u,{pe.OPTIONAL_HEADER.SizeOfImage},0x{meta["entry"]:08x}u,exports_{i},{len(exports)}}},\n')
     description += 'const BhlModule bhl_modules[] = {\n' + ''.join(rows) + '};\n'
     description += f'const unsigned bhl_module_count={len(metadata)};\n'
     (out / "modules.c").write_text(description)
-    sources += [ROOT / "runtime/rt.c", ROOT / "runtime/win32.c", ROOT / "runtime/loader.c", ROOT / "runtime/platform.c", ROOT / "runtime/directsound.c", ROOT / "runtime/threading.c", ROOT / "runtime/gdi.c", ROOT / "tests/abi_layout.c", out / "tables.c", out / "modules.c"]
+    sources += [ROOT / "runtime/rt.c", ROOT / "runtime/memory_watch.c", ROOT / "runtime/win32.c", ROOT / "runtime/loader.c", ROOT / "runtime/platform.c", ROOT / "runtime/directsound.c", ROOT / "runtime/threading.c", ROOT / "runtime/gdi.c", ROOT / "tests/abi_layout.c", out / "tables.c", out / "modules.c"]
     sdl_cflags=shlex.split(subprocess.check_output(['pkg-config','--cflags','sdl2'],text=True))
     sdl_libs=shlex.split(subprocess.check_output(['pkg-config','--libs','sdl2'],text=True))
     flags = ["clang", "-arch", "arm64", "-std=gnu11", f"-O{args.opt}", "-g",
-             "-ffp-contract=off", "-fno-strict-aliasing", "-Wno-unused-value",
+             "-DRT_MEMORY_WATCH", "-ffp-contract=off", "-fno-strict-aliasing", "-Wno-unused-value",
              "-I", str(ROOT / "runtime"), "-I", str(out)]
     if args.lto:flags += ['-flto=thin']
     headers = b''.join(p.read_bytes() for p in sorted((ROOT / "runtime").glob("*.h")))

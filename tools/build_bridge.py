@@ -23,6 +23,8 @@ def main():
     paths.append(ROOT/'runtime/v3_lifetime.inc')
     paths.append(ROOT/'runtime/borrowed_strings.inc')
     paths.append(ROOT/'runtime/bridge_profile.inc')
+    paths.append(ROOT/'runtime/server_entity_access.inc')
+    paths.append(ROOT/'runtime/memory_watch.h')
     (out/'build.json').write_text(json.dumps({str(p.relative_to(ROOT)):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths},indent=2)+'\n')
 
 

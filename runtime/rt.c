@@ -35,7 +35,7 @@ static void fault(Ctx *c, uint32_t pc, const char *what)
 {
     fault_pc = pc; fault_what = what;
     rt_fault_hook(c, pc, what);                               /* crash report (native app); nothing in tests */
-    if (fault_jmp) longjmp(*fault_jmp, 1);
+    if (fault_jmp) _longjmp(*fault_jmp, 1);
     fprintf(stderr, "recomp: fatal: %s at %08x (eax %08x ecx %08x edx %08x ebx %08x esp %08x ebp %08x esi %08x edi %08x)\n",
             what, pc, c->eax, c->ecx, c->edx, c->ebx, c->esp, c->ebp, c->esi, c->edi);
     abort();
@@ -194,6 +194,7 @@ double rt_x87_2(int op, double y, double x)
 }
 double rt_f80_load(const uint8_t *M, uint32_t a)
 {
+    rt_watch_memory(a,10);
     uint64_t mant; uint16_t se; memcpy(&mant, M + a, 8); memcpy(&se, M + a + 8, 2);
     int e = se & 0x7fff; double s = (se & 0x8000) ? -1.0 : 1.0;
     if (e == 0 && mant == 0) return s * 0.0;
@@ -202,6 +203,7 @@ double rt_f80_load(const uint8_t *M, uint32_t a)
 }
 void rt_f80_store(uint8_t *M, uint32_t a, double v)
 {
+    rt_watch_memory(a,10);
     uint64_t mant = 0; uint16_t se = signbit(v) ? 0x8000 : 0;
     if (isnan(v)) { se |= 0x7fff; mant = 0xc000000000000000ull; }
     else if (isinf(v)) { se |= 0x7fff; mant = 0x8000000000000000ull; }
@@ -280,7 +282,9 @@ int rt_test_run(Ctx *c, uint32_t fn_addr, uint32_t *pc, const char **what)
     if (!fn && fn_addr < RT_IMPORT_BASE) { *pc = fn_addr; *what = "no such function"; return 2; }
     fenv_t environment;fegetenv(&environment);uint32_t previous_rc=rt_host_rc;
     jmp_buf jb; jmp_buf *previous = fault_jmp; fault_jmp = &jb;
-    if (setjmp(jb)) { fault_jmp = previous;fesetenv(&environment);rt_host_rc=previous_rc; *pc = fault_pc; *what = fault_what; return 1; }
+    /* These explicit translated faults never change native signal masks.
+       Avoid saving/restoring the process signal state on every callback. */
+    if (_setjmp(jb)) { fault_jmp = previous;fesetenv(&environment);rt_host_rc=previous_rc; *pc = fault_pc; *what = fault_what; return 1; }
     rt_host_rc=UINT32_MAX;
     rt_fpcr_sync(c->fcw);
     if(fn)fn(c);else rt_call(c,fn_addr);

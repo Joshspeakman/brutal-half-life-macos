@@ -17,8 +17,10 @@ def scalar_body(returns, arguments, callee):
             converted.append(f'({kind})A({word})')
         elif kind=='float':converted.append(f'rt_rf32(G_MEM,c->esp+{4+word*4})')
         elif kind in ('char *','const char *'):converted.append(f'gs(A({word}))')
+        elif kind=='const float *':converted.append(f'({kind})gs_read(A({word}),12)')
+        elif kind=='const wrect_t *':converted.append(f'({kind})gs_read(A({word}),16)')
         elif kind in ('float *','const float *','int *','short *','const wrect_t *','unsigned char *','const unsigned char *','byte *','const byte *','struct pmtrace_s *'):
-            converted.append(f'({kind})(A({word})?G_MEM+A({word}):NULL)')
+            converted.append(f'({kind})gs(A({word}))')
         else:return None
         word+=1
     call=callee+'('+','.join(converted)+')'

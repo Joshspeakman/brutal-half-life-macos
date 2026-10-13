@@ -73,10 +73,13 @@ not activate Game Mode. On macOS 26 or later, Command-Escape opens Game Overlay;
 if Game Mode was manually disabled there, macOS remembers that choice.
 The resolution selector sets window size; native fullscreen uses desktop resolution.
 
-The translated runtime builds at `-O2` with ThinLTO. The adapters avoid
-unnecessary world-state copies, validate cached model identities, and track
-native particle allocation lifetimes. See [performance notes](docs/PERFORMANCE.md)
-for measurements, reproduction commands and the remaining CPU bottleneck.
+The translated runtime builds at `-O2` with ThinLTO. The adapters synchronize
+entity state when translated code first accesses it, validate cached model
+identities, and track native particle allocation lifetimes. In matched Metal
+combat tests on the development M1 Pro, this increased the average from about
+48 to 116–118 FPS while retaining the original effects and simulation. Brief drops
+remain. See [performance notes](docs/PERFORMANCE.md) for measurement conditions,
+reproduction commands and limits.
 
 ## Verified progress
 

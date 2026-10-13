@@ -22,6 +22,17 @@ void test_wait_entry(Ctx *c)
     c->eax=api(c,"KERNEL32.dll!WaitForSingleObject",args,2);c->esp+=8;
 }
 void test_cdecl_entry(Ctx *c){test_tls_entry(c);c->esp-=4;}
+void test_callback_tick(Ctx *c){c->eax=1;c->esp+=4;}
+void test_dynamic_entry(Ctx *c)
+{
+    uint32_t p=rt_r32(G_MEM,c->esp+4),tick=bhl_thunk("test!native-tick",test_callback_tick);
+    rt_w32(G_MEM,p,1);
+    for(unsigned i=0;i<10000000;i++){
+        Ctx child=*c;child.esp-=4;rt_w32(G_MEM,child.esp,0x00100000);
+        rt_call(&child,tick);
+    }
+    c->eax=55;c->esp+=8;
+}
 void test_critical_entry(Ctx *c)
 {
     uint32_t p=rt_r32(G_MEM,c->esp+4),lock=rt_r32(G_MEM,p),delay=100;

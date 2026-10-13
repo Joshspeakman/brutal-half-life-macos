@@ -45,7 +45,9 @@ def main():
     environment=dict(os.environ,BHL_IMAGE_DIR=str(ROOT/'work/images'),SDL_VIDEODRIVER=args.video_driver,SDL_AUDIODRIVER='dummy',DYLD_LIBRARY_PATH=str(session))
     if args.trace:environment.update(BHL_TRACE='1',BHL_BRIDGE_TRACE='1')
     if args.weapons:environment['BHL_COMBAT_TRACE']='1'
-    command=['./xash3d','-game','bhl','-ref',args.renderer,'-hidden','-windowed','-width','800','-height','600','-nomouse','-dev','3','-noip','-noip6','-nomaster','-nowriteconfig','-console','+sv_lan','1','+map',args.map]
+    # Let a native fault fail this bounded process immediately. Xash's crash
+    # dialog otherwise waits for desktop input until the harness times out.
+    command=['./xash3d','-noch','-game','bhl','-ref',args.renderer,'-hidden','-windowed','-width','800','-height','600','-nomouse','-dev','3','-noip','-noip6','-nomaster','-nowriteconfig','-console','+sv_lan','1','+map',args.map]
     if args.renderer=='metal':
         environment.update(SDL_EGL_LIBRARY=str(session/'libEGL.dylib'),SDL_OPENGL_LIBRARY=str(session/'libGLESv2.dylib'),ANGLE_DEFAULT_PLATFORM='metal')
         command.insert(1,'-metal')

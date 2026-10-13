@@ -15,7 +15,7 @@ class Threads(unittest.TestCase):
         library=out/'fixture.dylib'
         subprocess.run(['clang','-arch','arm64','-dynamiclib','-O1','-I',str(ROOT/'runtime'),str(ROOT/'tests/thread_fixture.c'),'-L',str(ROOT/'work/native'),'-lbhl','-Wl,-rpath,'+str(ROOT/'work/native'),'-o',str(library)],check=True)
         cls.n=Native();cls.fixture=C.CDLL(str(library))
-        cls.functions={name:cls.n.lib.bhl_thunk(('test!'+name).encode(),C.cast(getattr(cls.fixture,name),C.c_void_p)) for name in ['test_tls_entry','test_wait_entry','test_critical_entry','test_cdecl_entry']}
+        cls.functions={name:cls.n.lib.bhl_thunk(('test!'+name).encode(),C.cast(getattr(cls.fixture,name),C.c_void_p)) for name in ['test_tls_entry','test_wait_entry','test_critical_entry','test_cdecl_entry','test_dynamic_entry','test_callback_tick']}
 
     def api(self,name,*args):return self.n.call(self.n.lib.bhl_thunk(('KERNEL32.dll!'+name).encode(),None),args,stdcall=True)
     def words(self,p,n=1):return struct.unpack('<'+'I'*n,self.n.read(p,4*n))
@@ -70,6 +70,21 @@ class Threads(unittest.TestCase):
         self.assertEqual(self.words(lock+8,2),(0,0))
         self.api('EnterCriticalSection',lock);self.api('LeaveCriticalSection',lock)
         self.api('DeleteCriticalSection',lock);self.api('CloseHandle',h)
+
+    def test_termination_at_native_callback_checkpoint(self):
+        p=self.blob(0);h,tid=self.create('test_dynamic_entry',p);self.ready(p)
+        self.assertEqual(self.api('TerminateThread',h,77),1)
+        out=self.n.alloc(4);self.api('GetExitCodeThread',h,out)
+        self.assertEqual(self.words(out)[0],77);self.api('CloseHandle',h)
+
+    def test_native_callback_import_observer(self):
+        phases=[];observer_type=C.CFUNCTYPE(None,C.POINTER(type(self.n.context)),C.c_uint32,C.c_int)
+        observer=observer_type(lambda c,index,phase:phases.append((index,phase)))
+        self.n.lib.bhl_set_import_observer.argtypes=[observer_type]
+        self.n.lib.bhl_set_import_observer(observer)
+        try:self.assertEqual(self.n.call(self.functions['test_callback_tick'],[]),1)
+        finally:self.n.lib.bhl_set_import_observer(observer_type())
+        self.assertEqual([p for i,p in phases],[0,1]);self.assertEqual(phases[0][0],phases[1][0])
 
 
 if __name__=='__main__':

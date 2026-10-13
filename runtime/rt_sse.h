@@ -10,8 +10,8 @@
 #ifndef RT_SSE_H
 #define RT_SSE_H
 
-static inline void rt_ldx(const uint8_t *M, X128 *s, uint32_t a, unsigned n) { memset(s, 0, 16); memcpy(s, M + a, n); }
-static inline void rt_stx(uint8_t *M, uint32_t a, const X128 *s, unsigned n) { memcpy(M + a, s, n); }
+static inline void rt_ldx(const uint8_t *M, X128 *s, uint32_t a, unsigned n) { rt_watch_memory(a,n); memset(s, 0, 16); memcpy(s, M + a, n); }
+static inline void rt_stx(uint8_t *M, uint32_t a, const X128 *s, unsigned n) { rt_watch_memory(a,n); memcpy(M + a, s, n); }
 
 /* ---- float arithmetic: packed (ps/pd) and lowest lane (ss/sd, the other lanes unchanged) ---- */
 #define SSE_ARITH(name, EXPR) \

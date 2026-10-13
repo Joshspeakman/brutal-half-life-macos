@@ -719,11 +719,11 @@ class Lifter:
         if not rep: return '{ uint32_t d = %s; %s }' % (step, one)
         if base in ('movs', 'stos', 'lods') or rep == 'rep' and base not in ('scas', 'cmps'):
             if base == 'movs' and k == 4:
-                fast = 'if (!f.df && (edi >= esi + ecx * 4u || edi + ecx * 4u <= esi)) { memmove(M + edi, M + esi, (size_t)ecx * 4u); esi += ecx * 4u; edi += ecx * 4u; ecx = 0; } else '
+                fast = 'if (!f.df && (edi >= esi + ecx * 4u || edi + ecx * 4u <= esi)) { rt_guest_move(M, edi, esi, (size_t)ecx * 4u); esi += ecx * 4u; edi += ecx * 4u; ecx = 0; } else '
             elif base == 'movs' and k == 1:
-                fast = 'if (!f.df && (edi >= esi + ecx || edi + ecx <= esi)) { memmove(M + edi, M + esi, ecx); esi += ecx; edi += ecx; ecx = 0; } else '
+                fast = 'if (!f.df && (edi >= esi + ecx || edi + ecx <= esi)) { rt_guest_move(M, edi, esi, ecx); esi += ecx; edi += ecx; ecx = 0; } else '
             elif base == 'stos' and k == 1:
-                fast = 'if (!f.df) { memset(M + edi, (int)(eax & 0xffu), ecx); edi += ecx; ecx = 0; } else '
+                fast = 'if (!f.df) { rt_guest_set(M, edi, (int)(eax & 0xffu), ecx); edi += ecx; ecx = 0; } else '
             else: fast = ''
             return '{ uint32_t d = %s; %swhile (ecx) { %s ecx--; } }' % (step, fast, one)
         stop = 'if (!CC_E) break;' if rep in ('repe', 'rep') else 'if (CC_E) break;'

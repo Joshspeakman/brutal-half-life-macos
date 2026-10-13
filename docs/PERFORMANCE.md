@@ -2,9 +2,107 @@
 
 The local app now combines ARM64 CPU code with Metal rendering through ANGLE.
 A 120 FPS launcher option sets a ceiling; it does not promise that all scenes
-can reach it. The earlier CPU optimization measurements below used OpenGL.
+can reach it. The initial Metal build's roughly 48 FPS combat result was limited
+by CPU synchronization. Access tracking now brings the same bounded combat
+workload close to 120 FPS. Short drops remain; this is not a locked 120 FPS build.
 
-## Changes
+## Updated Metal measurements
+
+The October 13 comparison uses the same M1 Pro, Metal renderer, scene scripts,
+2560 × 1440 physical render size, dummy audio, fixed simulation step, VSync off
+and 1,000 FPS ceiling. The baseline is `cb0ac3d`, before access tracking.
+Short runs measure 1,199 real presentation intervals from 1,200 frames.
+
+| Workload | Previous FPS | Updated FPS | Previous 1% low | Updated 1% low |
+|---|---:|---:|---:|---:|
+| Campaign hub (`start`) | 92.22 | 118.63 | 71.21 | 97.31 |
+| Mounted-weapon combat (`c2a2d`, assault rifle), run A | 47.50 | 116.33 | 28.26 | 77.71 |
+| Same combat, run B | 47.50 | 116.42 | 28.26 | 79.33 |
+| Early campaign (`c1a0`) | 116.19 | 117.86 | 57.72 | 73.73 |
+
+A longer 12,000-frame combat run averaged 118.19 FPS with a 68.73 FPS 1% low.
+This extends the same scripted scene; it does not represent sustained firing
+for the entire run or a full campaign playthrough. A separate 6,000-frame run
+with entity-access auditing found no untracked writes. Audit timings are
+excluded from performance claims. The full-scan comparison control on the
+updated runtime averaged 57.76 FPS, confirming the cost of repeated scans.
+
+A separate visible fullscreen run used normal elapsed simulation time,
+CoreAudio output, the 120 FPS limit and VSync, at 3456 × 2168 physical pixels.
+Across 3,600 frames it averaged **118.75 FPS**, with a **69.02 FPS 1% low**.
+Both engine and original FMOD output verified CoreAudio, and `gamepolicyd`
+confirmed Game Mode activation for the game process. This is near the target
+on average, but the slower frames prevent a locked 120 FPS result.
+Its reports are `combat120-final-fullscreen.json` and
+`combat120-final-fullscreen-gamemode.json` under `work/reports/`.
+
+Reports are `work/reports/combat120-final-{combat-a,combat-b,hub,early}.json`,
+`combat120-soak.json`, `combat120-soak-audit.json` and
+`combat120-eager-control.json`. They record exact loaded library hashes.
+The first attempted long run did not execute because its test script exceeded
+Xash's 32 KiB command buffer. The harness now uses Xash's counted `wait` command
+for more than 4,096 frames; original short-run scripts remain unchanged.
+
+The corrected build passed all 134 map activation/capture checks, twelve
+sustained weapon batches requesting all 36 exported classes, and SDL input
+checks with access auditing enabled. All nine packaged-launcher stages passed,
+including fresh-process save/reload, a landmark transition, combat, fourteen
+level loads in one process, and fullscreen/window resizing. Runtime service,
+audio, worker cancellation and memory-barrier checks passed; all 990 startup
+comparison boundaries still match. Native boundary fixtures additionally cover
+cached pointers, cross-page and bulk accesses, pending writes, overlapping
+entity pools, original-created entities and retired temporary effects.
+These are bounded checks, not full campaign or physical-input acceptance.
+The local evidence index is `work/reports/combat120-release-verification.json`.
+
+## Combat CPU synchronization changes
+
+The October 13 follow-up replaces repeated whole-world mirror scans with
+materialization at the first translated memory access in a callback. Cached
+entity pointers remain valid: scalar, stack, x87, SSE, atomic and bulk memory
+helpers observe accesses before executing the original read or write. The
+barrier covers all records that overlap a touched page, including unaligned
+accesses spanning two pages. Audio workers have independent thread state.
+
+Both client entities and server edicts keep stable guest addresses. Native
+boundaries publish changed records and start a fresh generation after the
+native callback. Bounded, synchronous vector inputs synchronize their exact
+range. Unbounded pointer escapes and native CRT/OS imports restore complete
+synchronization, retaining pending original writes. Pure scalar CRT math stays
+inside the access scope because it cannot borrow entity pointers. Client entities
+created by original code publish their initial guest contents before the first
+native read. Temporary-effect headers share the access barrier with their entity
+bodies; final active-list membership determines which bodies are published at
+callback completion, including newly allocated effects that were never drawn.
+Retired bodies discard their comparison snapshots: edits made while unlinking
+an effect cannot leak into a later reuse or appear as writes in a later scope.
+The sustained weapon audit exposed this case, and a regression reproduces the
+failure before the fix and verifies fresh native contents after slot reuse.
+
+Additional reductions preserve original gameplay and renderer settings:
+
+- Hash guest entity identities and avoid repeatedly walking every temporary
+  entity for each visible submission.
+- Validate shared model descriptors and server string IDs once per synchronous
+  scan, with fresh validation on the next native boundary.
+- Read diagnostic environment options once at library load. Keep cancellable
+  worker checkpoints and import observers while shortening normal engine-thread
+  callback dispatch.
+- Use sorted export lookup and avoid saving native signal masks around explicit
+  translated fault checkpoints. Floating-point state restoration remains intact.
+- Cache absent model names only while `Xash_GetModelLookupRevisionV1` agrees.
+  The engine invalidates this revision on model creation, loading, freeing,
+  client precache edits and client-state clearing. Engines without the optional
+  query continue searching on every miss. Positive lookups still validate the
+  live index, pointer, name and level/video epoch.
+
+`BHL_EAGER_ENTITIES=1` selects full mirror scans as a comparison control.
+`BHL_VERIFY_ENTITY_ACCESS=1` audits untouched mirrors for untracked writes;
+this extra work must not be enabled for performance measurements. The benchmark
+exposes these as `--eager-entities` and `--verify-entities` and records them.
+Neither option changes effects, enemy counts or simulation frequency.
+
+## Earlier changes
 
 - Compile all four translated modules at `-O2` with ThinLTO, retaining
   `-ffp-contract=off` and `-fno-strict-aliasing`. The runtime builder's
@@ -17,7 +115,8 @@ can reach it. The earlier CPU optimization measurements below used OpenGL.
 - Publish pending message state at MessageEnd. MakeVectors and GetModelPtr
   transfer only the fields the pinned native functions consume.
 - Cache successful model-name lookups with index, pointer, name and epoch
-  validation. Missing models are never cached.
+  validation. The later revision-aware cache described above also caches
+  missing models when the engine supplies explicit invalidation evidence.
 - Skip unchanged temporary-entity and particle prefixes. The native engine
   exports particle pool allocation identities, including tracers and beam
   trails. Free slots are not walked or written, and recycled slots receive
@@ -65,6 +164,9 @@ the map's enemies and mounted weapons remain active. `--width` and `--height`
 are logical window dimensions; inspect `drawable_size` in the report for the
 actual Retina render size. `--fps-cap 60 --vsync` checks the combined controls.
 `--capture` saves the final scene after timing stops.
+`--audio coreaudio` enables real device output for a visible acceptance run;
+the default remains dummy audio for comparisons. `--real-time` selects normal
+elapsed simulation time rather than the fixed step used in matched comparisons.
 `--client`, `--server`, `--core` and `--engine` allow explicit library comparisons.
 Reports and raw intervals stay in ignored `work/reports/`.
 
@@ -141,7 +243,7 @@ These are targeted rendering contracts, not proof of whole-game pixel identity.
 The Metal path retains the original simulation, studio callbacks and effect
 counts. It is a Metal-backed compatibility renderer, not a direct Metal rewrite.
 
-## Metal comparison results
+## Initial Metal comparison results (before access tracking)
 
 Matched runs on the same M1 Pro, at 2560 × 1440 physical pixels, with 1,199
 presentation intervals per run and the original effects enabled. These are

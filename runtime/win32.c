@@ -524,6 +524,34 @@ void bhl_process_init(Ctx *c)
     if(mprotect(G_MEM+0x06000000,0x100000,PROT_NONE))abort();
 }
 
+/* Pure CRT math consumes register/stack values and cannot borrow entities.
+ * Keep the active memory scope; the stack reads still use watched helpers. */
+static int scalar_crt_import(Ctx *c,const char *qualified)
+{
+    if(strncasecmp(qualified,"MSVCRT.dll!",11))return 0;
+    const char *name=qualified+11;
+#define SCALAR(n) (!strcmp(name,n))
+#define SCALAR_RETURN(v,n) do{c->eax=(uint32_t)(v);c->esp+=4;return 1;}while(0)
+        if(SCALAR("abs"))SCALAR_RETURN(A(0)>>31?0u-A(0):A(0),0);
+        if(SCALAR("_ftol")){
+            double value=c->st[c->top];c->top=(c->top+1)&7;uint64_t result;
+            if(!isfinite(value)||value>=9223372036854775808.0||value< -9223372036854775808.0){result=0x8000000000000000ull;c->fsw|=1;}
+            else result=(uint64_t)(int64_t)trunc(value);
+            c->edx=(uint32_t)(result>>32);SCALAR_RETURN((uint32_t)result,0);
+        }
+        if(SCALAR("floor")||SCALAR("ceil")||SCALAR("sin")||SCALAR("cos")||SCALAR("sqrt")||SCALAR("fabs")||SCALAR("log")||SCALAR("atan")){
+            double value=rt_rf64(G_MEM,c->esp+4);
+            value=SCALAR("floor")?floor(value):SCALAR("ceil")?ceil(value):SCALAR("sin")?sin(value):SCALAR("cos")?cos(value):SCALAR("sqrt")?sqrt(value):SCALAR("fabs")?fabs(value):SCALAR("log")?log(value):atan(value);
+            FPUSH(value);SCALAR_RETURN(0,0);
+        }
+        if(SCALAR("pow")||SCALAR("fmod")){double a=rt_rf64(G_MEM,c->esp+4),b=rt_rf64(G_MEM,c->esp+12);FPUSH(SCALAR("pow")?pow(a,b):fmod(a,b));SCALAR_RETURN(0,0);}
+        if(SCALAR("ldexp")){FPUSH(ldexp(rt_rf64(G_MEM,c->esp+4),(int32_t)A(2)));SCALAR_RETURN(0,0);}
+        if(SCALAR("_CIpow")){double exponent=c->st[c->top];c->top=(c->top+1)&7;c->st[c->top]=pow(c->st[c->top],exponent);SCALAR_RETURN(0,0);}
+#undef SCALAR_RETURN
+#undef SCALAR
+    return 0;
+}
+
 static void dispatch_import(Ctx *c, uint32_t index)
 {
     const char *qualified = bhl_import_name(index);
@@ -531,6 +559,9 @@ static void dispatch_import(Ctx *c, uint32_t index)
     if (index >= rt_imptab_n && index - rt_imptab_n < dynamic_count && dynamic[index - rt_imptab_n].fn) {
         dynamic[index - rt_imptab_n].fn(c); return;
     }
+    if(scalar_crt_import(c,qualified))return;
+    /* Imported native services may retain or bulk-access borrowed pointers. */
+    rt_watch_materialize();
     const char *name = strchr(qualified, '!');
     extern int bhl_platform_import(Ctx *,const char *);
     if(bhl_platform_import(c,qualified))return;
@@ -610,25 +641,10 @@ static void dispatch_import(Ctx *c, uint32_t index)
         if(CRT("memcmp"))RETURN(memcmp(G_MEM+A(0),G_MEM+A(1),A(2)),0);
         if(CRT("memchr")){const void *p=memchr(G_MEM+A(0),A(1),A(2));RETURN(p?(const uint8_t*)p-G_MEM:0,0);}
         if(CRT("atoi"))RETURN(atoi((char*)G_MEM+A(0)),0);
-        if(CRT("abs"))RETURN(A(0)>>31?0u-A(0):A(0),0);
         if(CRT("strlen"))RETURN(strlen((char*)G_MEM+A(0)),0);
         if(CRT("strcmp"))RETURN(strcmp((char*)G_MEM+A(0),(char*)G_MEM+A(1)),0);
         if(CRT("strcpy")){strcpy((char*)G_MEM+A(0),(char*)G_MEM+A(1));RETURN(A(0),0);}
-        if(CRT("_ftol")){
-            double value=c->st[c->top];c->top=(c->top+1)&7;uint64_t result;
-            if(!isfinite(value)||value>=9223372036854775808.0||value< -9223372036854775808.0){result=0x8000000000000000ull;c->fsw|=1;}
-            else result=(uint64_t)(int64_t)trunc(value);
-            c->edx=(uint32_t)(result>>32);RETURN((uint32_t)result,0);
-        }
-        if(CRT("floor")||CRT("ceil")||CRT("sin")||CRT("cos")||CRT("sqrt")||CRT("fabs")||CRT("log")||CRT("atan")){
-            double value=rt_rf64(G_MEM,c->esp+4);
-            value=CRT("floor")?floor(value):CRT("ceil")?ceil(value):CRT("sin")?sin(value):CRT("cos")?cos(value):CRT("sqrt")?sqrt(value):CRT("fabs")?fabs(value):CRT("log")?log(value):atan(value);
-            FPUSH(value);RETURN(0,0);
-        }
-        if(CRT("pow")||CRT("fmod")){double a=rt_rf64(G_MEM,c->esp+4),b=rt_rf64(G_MEM,c->esp+12);FPUSH(CRT("pow")?pow(a,b):fmod(a,b));RETURN(0,0);}
         if(CRT("frexp")){int exponent;double result=frexp(rt_rf64(G_MEM,c->esp+4),&exponent);rt_w32(G_MEM,A(2),exponent);FPUSH(result);RETURN(0,0);}
-        if(CRT("ldexp")){FPUSH(ldexp(rt_rf64(G_MEM,c->esp+4),(int32_t)A(2)));RETURN(0,0);}
-        if(CRT("_CIpow")){double exponent=c->st[c->top];c->top=(c->top+1)&7;c->st[c->top]=pow(c->st[c->top],exponent);RETURN(0,0);}
         if(CRT("_initterm")){
             uint32_t first=A(0),last=A(1);
             if(last<first||last-first>0x10000||(last-first)%4){missing(c,"invalid CRT constructor range");return;}
@@ -1005,7 +1021,13 @@ static void dispatch_import(Ctx *c, uint32_t index)
 
 void rt_import(Ctx *c, uint32_t index)
 {
-    extern void bhl_thread_checkpoint(void);bhl_thread_checkpoint();
+    /* The engine TEB is never a cancellable worker. Preserve checkpoints on
+       every worker import, including native callbacks. */
+    extern void bhl_thread_checkpoint(void);if(c->fs_base!=BHL_TEB)bhl_thread_checkpoint();
+    unsigned callback=index-rt_imptab_n;
+    if(!import_observer&&!trace_enabled&&callback<dynamic_count&&dynamic[callback].fn){
+        dynamic[callback].fn(c);return;
+    }
     if(import_observer)import_observer(c,index,0);
     dispatch_import(c,index);
     if(import_observer)import_observer(c,index,1);

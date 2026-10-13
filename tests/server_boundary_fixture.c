@@ -134,6 +134,34 @@ static void tank_sprite_lifetime(void)
     bhl_heap_free(reused);bhl_heap_free(other);
     puts("Mounted-weapon sprite lifetime passed: expired references clear before allocation reuse");
 }
+extern float watched_float(uint32_t);
+extern void watched_write(uint32_t,float);
+extern void watched_move(uint32_t,uint32_t,size_t);
+static void server_demand_boundaries(void)
+{
+    uint32_t identity=guest_edict(fixture_edicts+1);
+    uint32_t health=identity+offsetof(BhlEdict,v)+offsetof(BhlEntvars,health);
+    fixture_edicts[1].v.health=25;server_demand_enabled=1;pull_entities();
+    assert(*(float*)gs_read(health,4)==25&&server_access_epoch&&server_demand_enabled);
+    assert(watched_float(health)==25);watched_write(health,35);
+    push_entities();assert(fixture_edicts[1].v.health==35);server_watch_suspend();
+    /* The engine updates host state between calls. The cached guest pointer
+       observes the new value without querying entity identity again. */
+    fixture_edicts[1].v.health=45;pull_entities();assert(watched_float(health)==45);
+    watched_write(health,55);push_entities();server_watch_suspend();
+    assert(fixture_edicts[1].v.health==55);
+    fixture_edicts[1].v.health=65;pull_entities();watched_write(health,75);
+    assert(gs(health)==(char*)G_MEM+health&&!server_access_epoch&&!server_demand_enabled);
+    assert(rt_rf32(G_MEM,health)==75);push_entities();assert(fixture_edicts[1].v.health==75);
+    /* Imported native services materialize all outstanding entities, retaining
+       edits already made through translated memory writes. */
+    server_demand_enabled=1;pull_entities();watched_write(health,85);
+    rt_watch_materialize();assert(!server_access_epoch&&rt_rf32(G_MEM,health)==85);
+    push_entities();assert(fixture_edicts[1].v.health==85);
+    server_demand_enabled=0;pull_entities();
+    puts("Demand server access passed: cached entvars, first writes, native handoff and pending writes");
+}
+
 int main(void)
 {
     bhl_initialize();globalvars_t globals={0};host_globals=&globals;globals.maxEntities=8;globals.maxClients=1;globals.pStringBase=fixture_strings;
@@ -158,6 +186,7 @@ int main(void)
     assert(unused->serialnumber==41&&unused->leafnums[3]==93);
     int original=fixture_edicts[1].v.classname;strcpy(fixture_strings+original,"crayer");
     sync_basic_globals();assert(!strcmp(gs(guest_strings+g->v.classname),"crayer"));
+    server_demand_boundaries();
     save_roundtrip();
     collision_equivalence();
     message_boundaries();

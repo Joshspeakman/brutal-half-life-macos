@@ -11,11 +11,22 @@ static model_t *fixture_model(const char *name,int *index){assert(!strcmp(name,"
 static cl_entity_t *studio_current(void){return &fixture_entities[1];}
 static int studio_bbox(void){assert(fixture_entities[1].origin[2]==44&&fixture_entities[2].origin[2]==0);fixture_entities[1].curstate.frame=77;return 1;}
 static void native_particle_think(particle_t *p,float frame){p->vel[1]+=frame;}
+static void original_temp_allocate(Ctx *c)
+{
+    extern uint32_t watched_u32(uint32_t);extern void watched_write_u32(uint32_t,uint32_t);
+    uint32_t first=watched_u32(temp_guest_heads),next=watched_u32(first+offsetof(BhlTempEntity,next));
+    watched_write_u32(temp_guest_heads,next);watched_write_u32(first+offsetof(BhlTempEntity,next),watched_u32(temp_guest_heads+4));
+    watched_write_u32(temp_guest_heads+4,first);
+    extern void watched_write(uint32_t,float);
+    watched_write(first+68+offsetof(BhlClientEntity,origin),617);c->eax=1;c->esp+=4;
+}
 static float visibility_random(float low,float high){assert(low<high);return 0.25f;}
 static model_t cached_model,*cached_model_at;static unsigned model_load_calls;
 static model_t *cache_load(const char *name,int *index)
 {model_load_calls++;if(index)*index=cached_model_at?11:-1;return cached_model_at;}
 static model_t *cache_index(int index){assert(index==11);return cached_model_at;}
+static uint64_t model_revision=1;
+static uint64_t cache_revision(void){return model_revision;}
 static void model_lookup_lifetime(void)
 {
     strcpy(cached_model.name,"models/fixture.mdl");cached_model_at=&cached_model;
@@ -28,6 +39,15 @@ static void model_lookup_lifetime(void)
     assert(client_load_model("models/fixture.mdl",NULL)==&cached_model&&model_load_calls==4);
     strcpy(cached_model.name,"models/fixture.mdl");model_reset();
     assert(client_load_model("models/fixture.mdl",NULL)==&cached_model&&model_load_calls==5);
+    client_model_revision=cache_revision;cached_model_at=NULL;model_revision++;
+    assert(!client_load_model("models/fixture.mdl",&index)&&index==-1&&model_load_calls==6);
+    assert(!client_load_model("MODELS\\FIXTURE.MDL",&index)&&index==-1&&model_load_calls==6);
+    /* A late resource arrival must invalidate a formerly absent name. */
+    cached_model_at=&cached_model;model_revision++;
+    assert(client_load_model("models/fixture.mdl",&index)==&cached_model&&index==11&&model_load_calls==7);
+    cached_model_at=NULL;model_revision++;assert(!client_load_model("models/fixture.mdl",NULL)&&model_load_calls==8);
+    model_reset();assert(!client_load_model("models/fixture.mdl",NULL)&&model_load_calls==9);
+    client_model_revision=NULL;assert(!client_load_model("models/fixture.mdl",NULL)&&model_load_calls==10);
     engine.CL_LoadModel=fixture_model;engine.pfnGetModelByIndex=NULL;
 }
 static void studio_event_scope(void)
@@ -123,6 +143,74 @@ static void visibility_equivalence(void)
     rt_w32(G_MEM,0x3014caa4,0);rt_w32(G_MEM,0x3015241c,0);h->model=NULL;entities_pull();
     puts("Original visibility callback equivalence passed: normal, sky camera, animated sky model, spectator");
 }
+extern float watched_float(uint32_t);
+extern void watched_write(uint32_t,float);
+extern void watched_move(uint32_t,uint32_t,size_t);
+extern void watched_vector(uint32_t,uint32_t);
+static void entity_access_scope(void)
+{
+    cl_entity_t *h=fixture_entities+1;uint32_t guest=entity_copy(h);
+    uint32_t origin=guest+offsetof(BhlClientEntity,origin);
+    h->origin[0]=121;h->origin[1]=122;
+    entity_lazy_begin();
+    /* A cached address, with no intervening entity API lookup. */
+    assert(watched_float(origin)==121);
+    watched_write(origin+4,321);entity_lazy_finish();
+    assert(h->origin[0]==121&&h->origin[1]==321);
+    /* First access is a write: all untouched host fields must survive. */
+    h->origin[2]=812;entity_lazy_begin();watched_write(origin,222);
+    entity_lazy_finish();assert(h->origin[0]==222&&h->origin[2]==812);
+    uint32_t buffer=bhl_heap_alloc(sizeof(BhlClientEntity),1);
+    h->origin[0]=444;entity_lazy_begin();watched_move(buffer,guest,sizeof(BhlClientEntity));
+    assert(((BhlClientEntity*)(G_MEM+buffer))->origin[0]==444);entity_lazy_finish();
+    h->origin[0]=555;entity_lazy_begin();watched_vector(buffer,origin);
+    assert(rt_rf32(G_MEM,buffer)==555);entity_lazy_finish();
+    h->origin[0]=666;entity_lazy_begin();watched_write(origin+4,777);
+    /* Native pointer escape and unknown native imports materialize the rest
+       without overwriting the original code's unpublished writes. */
+    assert(gs(origin)==(char*)G_MEM+origin&&!entity_access_epoch);
+    assert(rt_rf32(G_MEM,origin)==666&&rt_rf32(G_MEM,origin+4)==777);
+    entities_push();assert(h->origin[1]==777);
+    h->origin[0]=888;entity_lazy_begin();rt_watch_materialize();
+    assert(!entity_access_epoch&&rt_rf32(G_MEM,origin)==888);
+    /* Pool replacement resolves the indexed identity before dereferencing
+       its old host address. This also exercises a second watch generation. */
+    cl_entity_t *old=fixture_entities;fixture_entities=calloc(4,sizeof *fixture_entities);
+    fixture_entities[1].index=1;fixture_entities[1].origin[0]=999;free(old);
+    entity_lazy_begin();assert(entity_reference(fixture_entities+1)==guest);assert(watched_float(origin)==999);entity_lazy_finish();
+    fixture_entities[2].index=2;uint32_t second=entity_copy(fixture_entities+2);assert(second!=guest);
+    old=fixture_entities;fixture_entities++;fixture_entities[1].index=1;fixture_entities[1].origin[0]=1001;
+    entity_lazy_begin();assert(entity_reference(fixture_entities+1)==guest&&watched_float(origin)==1001);entity_lazy_finish();
+    fixture_entities=calloc(3,sizeof *fixture_entities);fixture_entities[1].index=1;free(old);
+    entity_lazy_begin();assert(watched_float(origin)==0);entity_lazy_finish();
+    h=fixture_entities+1;h->origin[0]=201;
+    entity_demand_enabled=1;entities_pull();
+    assert(*(float*)gs_read(origin,12)==201&&entity_access_epoch);
+    watched_write(origin,202);entities_push();assert(h->origin[0]==202&&!rt_watch_pages);
+    h->origin[0]=203;entities_pull();assert(watched_float(origin)==203);
+    watched_write(origin+4,204);entity_lazy_finish();entity_demand_enabled=0;assert(h->origin[1]==204);
+    entity_lazy_begin();watched_write(origin+4,401);
+    Ctx math={0};math.esp=bhl_heap_alloc(24,1);uint32_t math_stack=math.esp;
+    rt_wf64(G_MEM,math.esp+4,0.5);rt_call(&math,bhl_thunk("MSVCRT.dll!sin",NULL));
+    assert(entity_access_epoch&&rt_watch_pages&&math.st[math.top]==sin(0.5));
+    math.esp=math_stack;math.top=0;math.st[0]=3;math.st[1]=2;
+    rt_call(&math,bhl_thunk("MSVCRT.dll!_CIpow",NULL));
+    assert(entity_access_epoch&&rt_watch_pages&&math.top==1&&math.st[1]==8);
+    entity_lazy_finish();assert(h->origin[1]==401);bhl_heap_free(math_stack);
+    /* The original client can submit an entity it created itself. Its first
+       native mirror starts empty and must not replace the original fields. */
+    uint32_t owned=bhl_heap_alloc(sizeof(BhlClientEntity),1);
+    BhlClientEntity *created=(void*)(G_MEM+owned);created->index=-1;created->origin[0]=319;
+    static model_t owned_model;strcpy(owned_model.name,"original-created-model");owned_model.type=mod_brush;
+    created->model=model_guest(&owned_model);
+    entity_lazy_begin();cl_entity_t *native=entity_host(owned);
+    assert(native->origin[0]==319&&created->origin[0]==319&&native->model==&owned_model&&created->model);
+    entity_lazy_finish();native->origin[0]=320;
+    entity_lazy_begin();assert(watched_float(owned+offsetof(BhlClientEntity,origin))==320);entity_lazy_finish();
+    bhl_heap_free(buffer);
+    puts("Demand entity access passed: cached pointers, writes, bulk/SSE access, native escapes, pool replacement");
+}
+
 int main(void)
 {
     bhl_initialize();engine.GetEntityByIndex=get_entity;engine.GetViewModel=get_view;
@@ -153,6 +241,7 @@ int main(void)
     cl_entity_t *old=fixture_entities;fixture_entities=calloc(3,sizeof *fixture_entities);fixture_entities[1].index=1;fixture_entities[1].origin[0]=99;
     old[1].model=(void*)0xfafafafafafafafaull;free(old);entities_pull();
     assert(g->origin[0]==99&&g->model==0&&entity_host(p)==&fixture_entities[1]);
+    entity_access_scope();
     visibility_equivalence();
     model_lookup_lifetime();studio_event_scope();studio_flag_scope();
     TEMPENTITY temp[3]={0};temp[0].next=&temp[1];TEMPENTITY *free_head=&temp[0],*active_head=&temp[2];
@@ -179,6 +268,34 @@ int main(void)
     entities_pull();assert(rt_r32(G_MEM,heads)==f&&rt_r32(G_MEM,heads+4)==a);
     assert(((BhlTempEntity*)(G_MEM+a))->next==0&&((BhlTempEntity*)(G_MEM+a))->entity.curstate.frame==23);
     entities_push();assert(active_head->next==NULL&&free_head==&temp[0]);
+    /* Original code may activate a tempent without submitting it for drawing.
+       Completion must publish its body using the final guest list membership. */
+    assert(invoke_entity_demand(bhl_thunk("fixture!temp-allocate",original_temp_allocate),NULL,0)==1);
+    assert(active_head==&temp[0]&&temp[0].entity.origin[0]==617&&active_head->next==&temp[2]);
+    uint32_t die=f+offsetof(BhlTempEntity,die);
+    temp[0].die=77;entity_demand_enabled=1;entities_pull();assert(watched_float(die)==77);
+    watched_write(die,88);entities_push();assert(temp[0].die==88);
+    temp[0].die=99;temp[0].tentOffset[0]=9;entities_pull();assert(watched_float(die)==99);
+    assert(*(float*)gs_read(f+offsetof(BhlTempEntity,tentOffset),12)==9&&entity_access_epoch);
+    watched_write(die,321);assert(gs(f)==(char*)G_MEM+f&&!entity_access_epoch);
+    entities_push();assert(temp[0].die==321);entity_demand_enabled=0;
+    /* A dying effect can edit its body and unlink itself in the same update.
+       That unused body must not become an untracked write in a later scope,
+       or overwrite the native contents when this free slot is recycled. */
+    entity_demand_enabled=1;entities_pull();
+    uint32_t effect_origin=f+68+offsetof(BhlClientEntity,origin);
+    watched_write(effect_origin,901);
+    watched_write_u32(heads+4,a);
+    watched_write_u32(f+offsetof(BhlTempEntity,next),watched_u32(heads));
+    watched_write_u32(heads,f);entities_push();
+    assert(free_head==&temp[0]&&active_head==&temp[2]&&temp[0].entity.origin[0]!=901);
+    /* Begin an intervening scope while the record remains on the free list. */
+    entities_pull();effects_push();entity_lazy_finish();entity_demand_enabled=0;
+    free_head=temp[0].next;temp[0].next=active_head;active_head=&temp[0];temp[0].entity.origin[0]=902;
+    entity_demand_enabled=1;entities_pull();
+    bridge_verify_entities=1;entity_access_verify();bridge_verify_entities=0;
+    assert(watched_float(effect_origin)==902);
+    effects_push();entity_lazy_finish();entity_demand_enabled=0;
     temp_guest_heads=0;temp_free_head=temp_active_head=NULL;
     float matrix[128][3][4]={0};uint32_t m=studio_buffer(matrix,sizeof matrix);
     rt_wf32(G_MEM,m+4,3.5f);studio_push();assert(matrix[0][0][1]==3.5f);
@@ -195,6 +312,8 @@ int main(void)
     char text[]="first";model.entities=text;uint32_t mg=model_guest(&model);BhlModel *gm=(void*)(G_MEM+mg);assert(!strcmp(gs(gm->entities),"first"));
     memcpy(text,"later",6);model_invalidate();assert(model_guest(&model)==mg&&!strcmp(gs(gm->entities),"later"));
     model.numframes=9;assert(model_guest(&model)==mg&&gm->numframes==9);
+    model_validation_begin();assert(model_guest(&model)==mg);assert(model_guest(&model)==mg);model_validation_end();
+    model.numframes=10;model_validation_begin();assert(model_guest(&model)==mg&&gm->numframes==10);model_validation_end();
     uint32_t token=model_opaque(text,"fixture"),borrowed=borrowed_string("repeated-query");
     uint32_t before=bhl_heap_used();
     for(unsigned i=0;i<10000;i++)assert(borrowed_string("repeated-query")==borrowed);

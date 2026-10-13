@@ -18,10 +18,16 @@ _Static_assert(sizeof(BhlModel)==392,"guest model ABI");
 _Static_assert(sizeof(BhlHull)==40,"guest hull ABI");
 typedef struct ModelData {const void *host;uint32_t guest,size,epoch;struct ModelData *next;} ModelData;
 static ModelData *model_data;
-typedef struct ModelMirror {const model_t *host;uint32_t guest,epoch;model_t snapshot;struct ModelMirror *next;} ModelMirror;
+typedef struct ModelMirror {const model_t *host;uint32_t guest,epoch;uint64_t validation;model_t snapshot;struct ModelMirror *next;} ModelMirror;
 static ModelMirror *model_mirrors;
 static ModelMirror *model_hosts[4096];
 static uint32_t model_epoch=1;
+/* A synchronous mirror scan cannot mutate engine model descriptors. Validate
+   each distinct model once in that scan, even if hundreds of entities share it.
+   Outside the scan, every query still validates the descriptor normally. */
+static uint64_t model_validation_serial,model_validation_batch;
+static void model_validation_begin(void){if(model_validation_batch||!++model_validation_serial)abort();model_validation_batch=model_validation_serial;}
+static void model_validation_end(void){model_validation_batch=0;}
 static void model_invalidate(void){if(!++model_epoch)abort();}
 /* Video/map initialization invalidates borrowed model storage. Descriptors
  * keep their identity, but previous levels must not retain whole BSP/studio
@@ -63,6 +69,8 @@ static uint32_t model_guest(const model_t *h)
     if(!m||m->host!=h){for(m=model_mirrors;m&&m->host!=h;m=m->next);}
     if(!m){m=calloc(1,sizeof *m);if(!m)abort();m->host=h;m->guest=bhl_heap_alloc(sizeof(BhlModel),1);m->next=model_mirrors;model_mirrors=m;}
     model_hosts[bucket]=m;
+    if(model_validation_batch&&m->validation==model_validation_batch&&m->epoch==model_epoch)return m->guest;
+    m->validation=model_validation_batch;
     /* Model descriptors are engine-owned and unchanged through most studio
        callbacks. Avoid re-walking every model array and entity text lump. */
     if(m->epoch==model_epoch&&!memcmp(&m->snapshot,h,sizeof *h))return m->guest;

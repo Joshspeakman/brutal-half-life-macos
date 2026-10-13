@@ -2,6 +2,17 @@
  * measurements go to the game log at shutdown, never to an external service.
  * These adapters run on the engine thread. Nested totals intentionally overlap. */
 #include <time.h>
+/* These are launch options. Reading the process environment on every engine
+ * callback takes a libc lock even when all diagnostics are disabled. */
+static int bridge_eager_entities,bridge_verify_entities,bridge_trace,bridge_view_trace,bridge_combat_trace;
+__attribute__((constructor)) static void bridge_options_initialize(void)
+{
+    bridge_eager_entities=getenv("BHL_EAGER_ENTITIES")!=NULL;
+    bridge_verify_entities=getenv("BHL_VERIFY_ENTITY_ACCESS")!=NULL;
+    bridge_trace=getenv("BHL_BRIDGE_TRACE")!=NULL;
+    bridge_view_trace=getenv("BHL_VIEW_TRACE")!=NULL;
+    bridge_combat_trace=getenv("BHL_COMBAT_TRACE")!=NULL;
+}
 typedef struct BridgeTiming { const char *name; uint32_t key; uint64_t calls,ns,max_ns; } BridgeTiming;
 typedef struct BridgeTimer { BridgeTiming *entry; uint64_t start; } BridgeTimer;
 static BridgeTiming bridge_timings[4096];

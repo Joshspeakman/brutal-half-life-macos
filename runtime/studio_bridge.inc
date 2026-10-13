@@ -80,6 +80,7 @@ static int studio_events_reenter(void)
     if(!h||studio_header_epoch!=model_epoch||!current||h->length<(int)sizeof *h||h->numseq<=0||h->seqindex<0||
        (uint64_t)h->seqindex+(uint64_t)h->numseq*sizeof(mstudioseqdesc_t)>(unsigned)h->length)return 1;
     EntityCopy *p=entity_find_active(current);
+    if(p&&entity_access_epoch&&p->access_epoch!=entity_access_epoch)entity_pull(p);
     int sequence=p?((BhlClientEntity*)(G_MEM+p->guest))->curstate.sequence:current->curstate.sequence;
     if(sequence<0)sequence=0;if(sequence>=h->numseq)sequence=h->numseq-1;
     const mstudioseqdesc_t *s=(const void*)((const char*)h+h->seqindex+sequence*sizeof *s);
@@ -120,7 +121,7 @@ static void studio_dispatch(Ctx *c,unsigned slot)
     case BHL_STUDIO_Mem_Calloc:{uint64_t size=(uint64_t)A(0)*A(1);if(size>UINT32_MAX)RAW_RET(0);RAW_RET(bhl_heap_alloc(size,1));}
     default:break;
     }
-    studio_sync(1,complete);if(getenv("BHL_BRIDGE_TRACE"))fprintf(stderr,"studio %s\n",studio_names[slot]);
+    studio_sync(1,complete);if(bridge_trace)fprintf(stderr,"studio %s\n",studio_names[slot]);
     switch(slot){
     case BHL_STUDIO_Mem_Calloc:{uint64_t size=(uint64_t)A(0)*A(1);if(size>UINT32_MAX)STUDIO_RET(0);STUDIO_RET(bhl_heap_alloc(size,1));}
     case BHL_STUDIO_Cache_Check:{StudioCache *p=studio_cache(A(0));void *h=studio.Cache_Check(&p->host);if(!h){rt_w32(G_MEM,A(0),0);STUDIO_RET(0);}
@@ -194,7 +195,10 @@ static void studio_dispatch(Ctx *c,unsigned slot)
 #undef STUDIO_RET
 
 static int studio_draw_model(int flags)
-{uint32_t a=flags;return invoke_address(rt_r32(G_MEM,guest_studio_interface+4),&a,1);}
+{
+    uint32_t a=flags,fn=rt_r32(G_MEM,guest_studio_interface+4);
+    return invoke_address(fn,&a,1);
+}
 static int studio_draw_player(int flags,entity_state_t *state)
 {
     uint32_t p=copy_bytes(state,sizeof *state),a[]={flags,p};int r=invoke_address(rt_r32(G_MEM,guest_studio_interface+8),a,2);

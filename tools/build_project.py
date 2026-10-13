@@ -74,6 +74,7 @@ def main():
         run('threads','tests/test_threads.py')
         run('fmod','tests/test_fmod.py')
         run('vgui','tests/test_vgui.py')
+        run('memory-watch','tests/test_memory_watch.py')
         run('boundaries','tests/test_boundaries.py')
         for module in MODULES:run('differential-'+module,'tests/test_startup_differential.py','--module',module)
         run('server-map','tests/test_engine.py','--map','c0a0')

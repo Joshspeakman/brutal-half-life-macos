@@ -47,7 +47,9 @@ extern int bhl_heap_free(uint32_t);
 static cl_enginefunc_t engine;
 static uint32_t guest_engine;
 static void client_missing(const char *name){fprintf(stderr,"BHL native client: unimplemented %s\n",name);abort();}
-static char *gs(uint32_t p){return p?(char*)G_MEM+p:NULL;}
+static void entity_pointer_escape(uint32_t);
+static void *gs_read(uint32_t,size_t);
+static char *gs(uint32_t p){entity_pointer_escape(p);return p?(char*)G_MEM+p:NULL;}
 #include "guest_format.inc"
 static uint32_t copy_bytes(const void *data,size_t size)
 {
@@ -56,8 +58,9 @@ static uint32_t copy_bytes(const void *data,size_t size)
 static uint32_t copy_string(const char *text){return text?copy_bytes(text,strlen(text)+1):0;}
 #include "borrowed_strings.inc"
 static void sync_cvars(void);
+static uint32_t invoke_entity_demand(uint32_t,const uint32_t *,unsigned);
 static uint32_t invoke_address(uint32_t fn,const uint32_t *args,unsigned count)
-{BHL_PROFILE("client-export",fn);client_call_depth++;sync_cvars();entities_pull();uint32_t result=bhl_invoke(fn,args,count,0);entities_push();if(!--client_call_depth)entities_end();return result;}
+{if(!client_call_depth&&!bridge_eager_entities)return invoke_entity_demand(fn,args,count);BHL_PROFILE("client-export",fn);client_call_depth++;sync_cvars();entities_pull();uint32_t result=bhl_invoke(fn,args,count,0);entities_push();if(!--client_call_depth)entities_end();return result;}
 static uint32_t invoke(const char *name,const uint32_t *args,unsigned count)
 {
     uint32_t fn=bhl_export("client.dll",name);if(!fn)client_missing(name);return invoke_address(fn,args,count);
@@ -91,7 +94,7 @@ static void play_map_audio(void)
 }
 static void run_event(unsigned slot,event_args_t *event)
 {
-    if(getenv("BHL_COMBAT_TRACE"))fprintf(stderr,"BHL original weapon event: %s entity=%d\n",event_names[slot]?event_names[slot]:"unknown",event->entindex);
+    if(bridge_combat_trace)fprintf(stderr,"BHL original weapon event: %s entity=%d\n",event_names[slot]?event_names[slot]:"unknown",event->entindex);
     _Static_assert(sizeof(event_args_t)==72,"guest event layout");
     uint32_t p=copy_bytes(event,sizeof *event);invoke_address(event_guest[slot],&p,1);memcpy(event,G_MEM+p,sizeof *event);bhl_heap_free(p);
 }
@@ -117,15 +120,20 @@ static void client_dispatch(Ctx *,unsigned);
 #include "client_subtables.h"
 typedef struct CvarCopy { cvar_t *host;uint32_t guest,string;size_t capacity;struct CvarCopy *next; } CvarCopy;
 static CvarCopy *cvars;
+static void cvar_refresh(CvarCopy *p)
+{
+    cvar_t *h=p->host;
+    size_t size=strlen(h->string)+1;if(size>p->capacity){bhl_heap_free(p->string);p->capacity=size+32;p->string=bhl_heap_alloc(p->capacity,0);}
+    memcpy(G_MEM+p->string,h->string,size);rt_w32(G_MEM,p->guest+4,p->string);rt_w32(G_MEM,p->guest+8,h->flags);rt_wf32(G_MEM,p->guest+12,h->value);
+}
 static uint32_t cvar_copy(cvar_t *h)
 {
     if(!h)return 0;CvarCopy *p=cvars;while(p&&p->host!=h)p=p->next;
     if(!p){p=calloc(1,sizeof *p);if(!p)abort();p->host=h;p->guest=bhl_heap_alloc(20,1);rt_w32(G_MEM,p->guest,copy_string(h->name));p->next=cvars;cvars=p;}
-    size_t size=strlen(h->string)+1;if(size>p->capacity){bhl_heap_free(p->string);p->capacity=size+32;p->string=bhl_heap_alloc(p->capacity,0);}
-    memcpy(G_MEM+p->string,h->string,size);rt_w32(G_MEM,p->guest+4,p->string);rt_w32(G_MEM,p->guest+8,h->flags);rt_wf32(G_MEM,p->guest+12,h->value);
+    cvar_refresh(p);
     return p->guest;
 }
-static void sync_cvars(void){for(CvarCopy *p=cvars;p;p=p->next)cvar_copy(p->host);}
+static void sync_cvars(void){for(CvarCopy *p=cvars;p;p=p->next)cvar_refresh(p);}
 #define BHL_MODEL_NAMESPACE "client-model!"
 #include "model_bridge.inc"
 #include "client_model_lookup.inc"
@@ -140,17 +148,51 @@ typedef struct BhlClientEntity {
 _Static_assert(sizeof(entity_state_t)==340,"entity state ABI");
 _Static_assert(offsetof(BhlClientEntity,model)==2964,"guest client entity prefix");
 _Static_assert(sizeof(BhlClientEntity)==3000,"guest client entity size");
-typedef struct EntityCopy {cl_entity_t *host;uint32_t guest;int source,index,active;uint32_t epoch;int valid;cl_entity_t host_snapshot;BhlClientEntity guest_snapshot;struct EntityCopy *next;} EntityCopy;
-static EntityCopy *entities;
+typedef struct EntityCopy {cl_entity_t *host;uint32_t guest;int source,index,active;uint32_t epoch;int valid;uint64_t access_epoch;struct TempCopy *temp;struct EntityCopy *access_next,*unwatched_next,*guest_next,*transient_next,**transient_previous;cl_entity_t host_snapshot;BhlClientEntity guest_snapshot;struct EntityCopy *next;} EntityCopy;
+static EntityCopy *entities,*entity_transients;
+static void entity_lazy_materialize(void);
+static void entity_lazy_begin(void);
+static void entity_access_verify(void);
+static void entity_watch_suspend(void);
+static void entity_lazy_register(EntityCopy *);
+static uint64_t entity_access_serial,entity_access_epoch;
+static int entity_demand_enabled,entity_watch_running;
+static EntityCopy *entity_accessed;
+static void temp_lazy_pull(struct TempCopy *);
+static void temp_lazy_begin(void);
+static int temp_lazy_pending(void);
+static void temp_lazy_materialize(uint64_t);
+static void temp_access_verify(void);
+static void entity_access_record(EntityCopy *p)
+{
+    if(entity_access_epoch&&p->access_epoch!=entity_access_epoch){
+        p->access_epoch=entity_access_epoch;p->access_next=entity_accessed;entity_accessed=p;
+    }
+}
 /* Most renderer callbacks revisit the same few entities. Cache identity
    lookups only; every existing synchronization/lifetime check still runs. */
-static EntityCopy *entity_hosts[4096];
+static EntityCopy *entity_hosts[4096],*entity_guests[4096];
+static unsigned entity_guest_bucket(uint32_t guest){return ((guest>>4)*2654435761u)>>20;}
+static EntityCopy *entity_find_guest(uint32_t guest)
+{for(EntityCopy *p=entity_guests[entity_guest_bucket(guest)];p;p=p->guest_next)if(p->guest==guest)return p;return NULL;}
+static void entity_register_guest(EntityCopy *p)
+{unsigned bucket=entity_guest_bucket(p->guest);p->guest_next=entity_guests[bucket];entity_guests[bucket]=p;entity_lazy_register(p);}
+
 static unsigned entity_bucket(const void *host){uintptr_t h=(uintptr_t)host>>4;return (h^(h>>12))&4095;}
+static int entity_matches_host(EntityCopy *p,cl_entity_t *host)
+{
+    if(p->host!=host)return 0;
+    /* A replacement pool can overlap an old pool at a different slot. The
+       address alone does not establish the indexed entity's identity. */
+    if(p->source==1)return engine.GetViewModel()==host;
+    if(p->source==2)return engine.GetEntityByIndex(p->index)==host;
+    return 1;
+}
 static EntityCopy *entity_find(cl_entity_t *host)
 {
     if(!host)return NULL;unsigned bucket=entity_bucket(host);EntityCopy *p=entity_hosts[bucket];
-    if(p&&p->host==host)return p;
-    for(p=entities;p;p=p->next)if(p->host==host){entity_hosts[bucket]=p;return p;}
+    if(p&&entity_matches_host(p,host))return p;
+    for(p=entities;p;p=p->next)if(entity_matches_host(p,host)){entity_hosts[bucket]=p;return p;}
     return NULL;
 }
 static EntityCopy *entity_find_active(cl_entity_t *host)
@@ -158,7 +200,7 @@ static EntityCopy *entity_find_active(cl_entity_t *host)
     EntityCopy *p=entity_find(host);if(!p||p->active)return p;
     /* Preserve the existing active-mirror selection if a pool replacement
        temporarily leaves more than one record for a native address. */
-    for(p=p->next;p;p=p->next)if(p->host==host&&p->active)return p;
+    for(p=p->next;p;p=p->next)if(p->active&&entity_matches_host(p,host))return p;
     return NULL;
 }
 typedef struct TextCopy {client_textmessage_t *host;uint32_t guest,name,message;struct TextCopy *next;} TextCopy;
@@ -180,6 +222,7 @@ static uint32_t text_copy(client_textmessage_t *h)
 }
 static void entity_pull(EntityCopy *p)
 {
+    entity_access_record(p);
     cl_entity_t *previous=p->host;
     if(p->source==1)p->host=engine.GetViewModel();
     else if(p->source==2)p->host=engine.GetEntityByIndex(p->index);
@@ -200,7 +243,14 @@ static void entity_pull(EntityCopy *p)
 }
 static void entity_push(EntityCopy *p)
 {
-    if(!p->host||!p->active)return;
+    if(entity_access_epoch&&p->access_epoch!=entity_access_epoch)entity_pull(p);
+    if(!p->host||!p->active){
+        /* Retired tempent bodies are deliberately not published. Discard the
+           old comparison snapshot too: original code may have changed this
+           body while unlinking it, and native reuse becomes authoritative. */
+        if(p->source==4)p->valid=0;
+        return;
+    }
     cl_entity_t *h=p->host;BhlClientEntity *g=(void*)(G_MEM+p->guest);
     if(p->valid&&!memcmp(&p->guest_snapshot,g,sizeof *g))return;
     memcpy(h,g,offsetof(BhlClientEntity,model));
@@ -208,17 +258,50 @@ static void entity_push(EntityCopy *p)
     h->syncbase=g->syncbase;h->visframe=g->visframe;h->cvFloorColor=g->cvFloorColor;
     p->host_snapshot=*h;p->guest_snapshot=*g;p->epoch=model_epoch;p->valid=1;
 }
-static void entities_pull(void){BHL_PROFILE("client-pull",0);studio_pull();effects_pull();for(EntityCopy *p=entities;p;p=p->next)entity_pull(p);}
-static void entities_push(void){BHL_PROFILE("client-push",0);temp_entities_prepare(1);for(EntityCopy *p=entities;p;p=p->next)entity_push(p);effects_push();studio_push();}
-static void entities_end(void){for(EntityCopy *p=entities;p;p=p->next)if(!p->source)p->active=0;}
+static void entities_pull(void)
+{
+    BHL_PROFILE("client-pull",0);
+    if(entity_demand_enabled){studio_pull();effects_pull();entity_lazy_begin();return;}
+    entity_lazy_materialize();model_validation_begin();studio_pull();effects_pull();
+    for(EntityCopy *p=entities;p;p=p->next)entity_pull(p);model_validation_end();
+}
+static void entities_push(void)
+{
+    BHL_PROFILE("client-push",0);entity_access_verify();temp_entities_prepare(1);
+    if(entity_access_epoch){for(EntityCopy *p=entity_accessed;p;p=p->access_next)entity_push(p);}
+    else for(EntityCopy *p=entities;p;p=p->next)entity_push(p);
+    effects_push();studio_push();entity_watch_suspend();
+}
+static void entity_promote(EntityCopy *p,int source)
+{
+    if(p->transient_previous){*p->transient_previous=p->transient_next;if(p->transient_next)p->transient_next->transient_previous=p->transient_previous;p->transient_previous=NULL;p->transient_next=NULL;}
+    p->source=source;
+}
+static void entities_end(void){for(EntityCopy *p=entity_transients;p;p=p->transient_next)p->active=0;}
+static EntityCopy *entity_identity(cl_entity_t *host)
+{
+    EntityCopy *p=entity_find(host);if(p||!host)return p;
+    int view=engine.GetViewModel&&host==engine.GetViewModel();
+    int indexed=engine.GetEntityByIndex&&host->index>=0&&host->index<65536&&host==engine.GetEntityByIndex(host->index);
+    if(view||indexed)for(p=entities;p;p=p->next){
+        if((view&&p->source==1)||(indexed&&p->source==2&&p->index==host->index)){
+            /* Resolve an indexed identity before an accessor creates a new
+               mirror after a native entity pool replacement. */
+            entity_pull(p);return p;
+        }
+    }
+    return NULL;
+}
 static uint32_t entity_copy(cl_entity_t *h)
 {
-    if(!h)return 0;EntityCopy *p=entity_find(h);
+    if(!h)return 0;EntityCopy *p=entity_identity(h);
     /* Reserve a tempent prefix so an entity first seen in a renderer callback
        can later acquire its containing TEMPENTITY without changing address. */
     if(!p){p=calloc(1,sizeof *p);if(!p)abort();p->host=h;p->guest=bhl_heap_alloc(68+sizeof(BhlClientEntity),1)+68;p->next=entities;entities=p;entity_hosts[entity_bucket(h)]=p;
         if(engine.GetViewModel&&h==engine.GetViewModel())p->source=1;
-        else if(engine.GetEntityByIndex&&h->index>=0&&h->index<65536&&h==engine.GetEntityByIndex(h->index)){p->source=2;p->index=h->index;}}
+        else if(engine.GetEntityByIndex&&h->index>=0&&h->index<65536&&h==engine.GetEntityByIndex(h->index)){p->source=2;p->index=h->index;}
+        if(!p->source){p->transient_next=entity_transients;p->transient_previous=&entity_transients;if(entity_transients)entity_transients->transient_previous=&p->transient_next;entity_transients=p;}
+        entity_register_guest(p);}
     p->active=1;
     entity_pull(p);return p->guest;
 }
@@ -227,18 +310,31 @@ static uint32_t entity_copy(cl_entity_t *h)
 static uint32_t entity_reference(cl_entity_t *h)
 {
     if(!h)return 0;
-    EntityCopy *p=entity_find_active(h);if(p)return p->guest;
+    EntityCopy *p=entity_find_active(h);if(!p)p=entity_identity(h);if(p&&p->active)return p->guest;
     return entity_copy(h);
 }
 static cl_entity_t *entity_host(uint32_t g)
 {
-    if(!g)return NULL;for(EntityCopy *p=entities;p;p=p->next)if(p->guest==g){if(!p->active)client_missing("entity used after callback lifetime");entity_push(p);return p->host;}
+    if(!g)return NULL;EntityCopy *found=entity_find_guest(g);if(found){if(!found->active)client_missing("entity used after callback lifetime");entity_push(found);return found->host;}
     if(g<65536||(uint64_t)g+sizeof(BhlClientEntity)>0x100000000ull)client_missing("invalid guest entity");
     EntityCopy *p=calloc(1,sizeof *p);if(!p)abort();p->host=calloc(1,sizeof *p->host);if(!p->host)abort();
-    p->guest=g;p->source=3;p->active=1;p->next=entities;entities=p;entity_hosts[entity_bucket(p->host)]=p;entity_push(p);return p->host;
+    p->guest=g;p->source=3;p->active=1;p->next=entities;entities=p;entity_hosts[entity_bucket(p->host)]=p;entity_register_guest(p);
+    /* This object's first authoritative contents belong to the original
+       client. Do not pull the newly allocated, empty native mirror. */
+    entity_access_record(p);entity_push(p);return p->host;
 }
+#include "entity_access.inc"
 #include "effects_bridge.inc"
 #include "studio_bridge.inc"
+static uint32_t invoke_entity_demand(uint32_t fn,const uint32_t *args,unsigned count)
+{
+    BHL_PROFILE("client-export",fn);client_call_depth++;
+    entity_demand_enabled=1;sync_cvars();entities_pull();
+    uint32_t result=bhl_invoke(fn,args,count,0);
+    if(entity_access_epoch){temp_entities_prepare(1);effects_push();entity_lazy_finish();studio_push();}
+    else entities_push();
+    entity_demand_enabled=0;if(!--client_call_depth)entities_end();return result;
+}
 static void playback_event(Ctx *c,int event_api)
 {
     /* Pinned CL_PlaybackEvent does not read pInvoker: client events always
@@ -264,7 +360,7 @@ static void client_dispatch(Ctx *c,unsigned slot)
     default:break;
     }
     entities_push();
-    if(getenv("BHL_BRIDGE_TRACE"))fprintf(stderr,"client engine %s\n",client_engine_names[slot]);
+    if(bridge_trace)fprintf(stderr,"client engine %s\n",client_engine_names[slot]);
     switch(slot){
     case BHL_CL_pfnPlaybackEvent:playback_event(c,0);RET(0);
     case BHL_CL_PM_TraceLine:{static uint32_t result;pmtrace_t *h=engine.PM_TraceLine((float*)gs(A(0)),(float*)gs(A(1)),A(2),A(3),A(4));if(!h)RET(0);if(!result)result=bhl_heap_alloc(sizeof *h,1);memcpy(G_MEM+result,h,sizeof *h);RET(result);}
@@ -285,7 +381,7 @@ static void client_dispatch(Ctx *c,unsigned slot)
     }
     case BHL_CL_COM_FreeFile:if(!bhl_heap_free(A(0)))abort();RET(0);
     case BHL_CL_COM_ParseFile:{char *original=gs(A(0));char *end=engine.COM_ParseFile(original,gs(A(1)));if(end&&(end<original||end>original+strlen(original)))abort();RET(end?A(0)+(uint32_t)(end-original):0);}
-    case BHL_CL_pfnGetScreenInfo:{_Static_assert(sizeof(SCREENINFO)==532,"screen info ABI");RET(engine.pfnGetScreenInfo((void*)(G_MEM+A(0))));}
+    case BHL_CL_pfnGetScreenInfo:{_Static_assert(sizeof(SCREENINFO)==532,"screen info ABI");RET(engine.pfnGetScreenInfo((void*)gs(A(0))));}
     case BHL_CL_pfnSPR_GetList:{int count=0;client_sprite_t *list=engine.pfnSPR_GetList(gs(A(0)),&count);if(count<0||count>65536)abort();if(A(1))rt_w32(G_MEM,A(1),count);RET(copy_bytes(list,count*sizeof *list));}
     case BHL_CL_VGui_GetPanel:{void *panel=engine.VGui_GetPanel();if((uintptr_t)panel>UINT32_MAX)client_missing("native VGUI object cannot be used by the guest client");RET((uintptr_t)panel);}
     case BHL_CL_GetEntityByIndex:RET(entity_copy(engine.GetEntityByIndex(A(0))));
@@ -316,6 +412,7 @@ EXPORT int Initialize(cl_enginefunc_t *functions,int version)
 {
     if(!functions||version!=7)return 0;engine=*functions;
     particle_pool_initialize();
+    client_model_lookup_initialize();
     bhl_initialize();bhl_attach("vgui.dll");bhl_attach("client.dll");
     guest_engine=bhl_heap_alloc(135*4,1);fill_client_engine(guest_engine);
     uint32_t args[]={guest_engine,(uint32_t)version};int result=invoke("Initialize",args,2);
@@ -377,7 +474,7 @@ EXPORT void V_CalcRefdef(ref_params_t *params)
     memcpy(G_MEM+p,params,200);rt_w32(G_MEM,p+200,cmd);rt_w32(G_MEM,p+204,vars);memcpy(G_MEM+p+208,params->viewport,24);
     invoke("V_CalcRefdef",&p,1);
     memcpy(params,G_MEM+p,200);memcpy(params->viewport,G_MEM+p+208,24);
-    if(getenv("BHL_VIEW_TRACE"))fprintf(stderr,"BHL view time=%.3f origin=%.2f,%.2f,%.2f angles=%.2f,%.2f,%.2f sim=%.2f,%.2f,%.2f viewport=%d,%d,%d,%d next=%d only=%d spectator=%d viewentity=%d\n",params->time,params->vieworg[0],params->vieworg[1],params->vieworg[2],params->viewangles[0],params->viewangles[1],params->viewangles[2],params->simorg[0],params->simorg[1],params->simorg[2],params->viewport[0],params->viewport[1],params->viewport[2],params->viewport[3],params->nextView,params->onlyClientDraw,params->spectator,params->viewentity);
+    if(bridge_view_trace)fprintf(stderr,"BHL view time=%.3f origin=%.2f,%.2f,%.2f angles=%.2f,%.2f,%.2f sim=%.2f,%.2f,%.2f viewport=%d,%d,%d,%d next=%d only=%d spectator=%d viewentity=%d\n",params->time,params->vieworg[0],params->vieworg[1],params->vieworg[2],params->viewangles[0],params->viewangles[1],params->viewangles[2],params->simorg[0],params->simorg[1],params->simorg[2],params->viewport[0],params->viewport[1],params->viewport[2],params->viewport[3],params->nextView,params->onlyClientDraw,params->spectator,params->viewentity);
     if(params->cmd)memcpy(params->cmd,G_MEM+cmd,sizeof(usercmd_t));if(params->movevars)memcpy(params->movevars,G_MEM+vars,sizeof(movevars_t));
     bhl_heap_free(cmd);bhl_heap_free(vars);bhl_heap_free(p);
 }
@@ -439,7 +536,7 @@ EXPORT int HUD_GetHullBounds(int hull,float *mins,float *maxs)
        untouched. Preserve the engine's existing sizes across this in/out ABI. */
     uint32_t p=bhl_heap_alloc(24,1),args[]={(uint32_t)hull,p,p+12};memcpy(G_MEM+p,mins,12);memcpy(G_MEM+p+12,maxs,12);int result=invoke("HUD_GetHullBounds",args,3);
     memcpy(mins,G_MEM+p,12);memcpy(maxs,G_MEM+p+12,12);bhl_heap_free(p);
-    if(getenv("BHL_VIEW_TRACE"))fprintf(stderr,"BHL hullbounds client %d result=%d min=%.1f,%.1f,%.1f max=%.1f,%.1f,%.1f\n",hull,result,mins[0],mins[1],mins[2],maxs[0],maxs[1],maxs[2]);return result;
+    if(bridge_view_trace)fprintf(stderr,"BHL hullbounds client %d result=%d min=%.1f,%.1f,%.1f max=%.1f,%.1f,%.1f\n",hull,result,mins[0],mins[1],mins[2],maxs[0],maxs[1],maxs[2]);return result;
 }
 static playermove_t *host_pmove;
 static uint32_t guest_pmove;

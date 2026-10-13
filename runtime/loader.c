@@ -51,7 +51,12 @@ void bhl_initialize(void)
 uint32_t bhl_export(const char *module,const char *name)
 {
     for(unsigned k=0;k<bhl_module_count;k++)if(!strcmp(module,bhl_modules[k].name))
-        for(unsigned i=0;i<bhl_modules[k].export_count;i++)if(!strcmp(name,bhl_modules[k].exports[i].name))return bhl_modules[k].exports[i].address;
+        {
+            const BhlModule *m=bhl_modules+k;unsigned lo=0,hi=m->export_count;
+            while(lo<hi){unsigned mid=lo+(hi-lo)/2;int order=strcmp(name,m->exports[mid].name);
+                if(!order)return m->exports[mid].address;if(order<0)hi=mid;else lo=mid+1;}
+            return 0;
+        }
     return 0;
 }
 static uint32_t invoke_context(uint32_t function,uint32_t object,const uint32_t *args,unsigned count,int stdcall,int thiscall)

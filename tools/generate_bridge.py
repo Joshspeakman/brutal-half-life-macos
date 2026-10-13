@@ -137,8 +137,9 @@ _Static_assert(offsetof(BhlEdict,v)==128,"guest edict entvars offset");
             elif kind=='float':expressions.append(f'rt_rf32(G_MEM,c->esp+{4+4*i})')
             elif kind in ('char *','const char *'):expressions.append(f'gs(A({i}))')
             elif kind in ('edict_t *','const edict_t *'):expressions.append(f'host_edict(A({i}))')
+            elif kind=='const float *':expressions.append(f'({kind})gs_read(A({i}),12)')
             elif kind in ('float *','const float *','int *','unsigned int *','unsigned char *'):
-                expressions.append(f'(A({i})?({kind})(G_MEM+A({i})):NULL)')
+                expressions.append(f'({kind})gs(A({i}))')
             else:valid=False;break
         if not valid:continue
         ret=' '.join(returns.replace('*',' * ').split())

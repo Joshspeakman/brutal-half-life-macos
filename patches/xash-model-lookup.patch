@@ -1,0 +1,119 @@
+diff --git a/engine/common/model.c b/engine/common/model.c
+--- a/engine/common/model.c
++++ b/engine/common/model.c
+@@ -23,6 +23,18 @@
+ #include "enginefeatures.h"
+ #include "client.h"
+ #include "server.h"
++
++/* Native adapters may cache absent models only while this revision agrees.
++ * Every client-table edit and model-name lifetime change invalidates it. */
++static uint64_t model_lookup_revision = 1;
++void Mod_InvalidateModelLookup( void )
++{
++	if( !++model_lookup_revision ) Sys_Error( "Model lookup revision overflow" );
++}
++uint64_t EXPORT Xash_GetModelLookupRevisionV1( void )
++{
++	return model_lookup_revision;
++}
+ 
+ static model_info_t	mod_crcinfo[MAX_MODELS];
+ static model_t	mod_known[MAX_MODELS];
+@@ -162,6 +174,7 @@
+ 		world.phsofs = NULL;
+ 	}
+ 
++	Mod_InvalidateModelLookup();
+ 	memset( mod, 0, sizeof( *mod ));
+ }
+ 
+@@ -279,6 +292,7 @@
+ 		mod_numknown++;
+ 	}
+ 
++	Mod_InvalidateModelLookup();
+ 	// copy name, so model loader can find model file
+ 	Q_strncpy( mod->name, modname, sizeof( mod->name ));
+ 	if( trackCRC ) mod_crcinfo[i].flags = FCRC_SHOULD_CHECKSUM;
+@@ -321,6 +335,7 @@
+ 		return NULL;
+ 	}
+ 
++	Mod_InvalidateModelLookup();
+ 	// store modelname to show error
+ 	Q_strncpy( tempname, mod->name, sizeof( tempname ));
+ 	COM_FixSlashes( tempname );
+@@ -429,6 +444,7 @@
+ 	}
+ 	Mem_Free( buf );
+ 
++	Mod_InvalidateModelLookup();
+ 	return mod;
+ }
+ 
+diff --git a/engine/common/mod_local.h b/engine/common/mod_local.h
+--- a/engine/common/mod_local.h
++++ b/engine/common/mod_local.h
+@@ -144,6 +144,7 @@
+ // model.c
+ //
+ void Mod_Init( void );
++void Mod_InvalidateModelLookup( void );
+ void Mod_FreeModel( model_t *mod );
+ void Mod_FreeAll( void );
+ void Mod_Shutdown( void );
+diff --git a/engine/client/cl_main.c b/engine/client/cl_main.c
+--- a/engine/client/cl_main.c
++++ b/engine/client/cl_main.c
+@@ -1625,6 +1625,7 @@
+ 	NetAPI_CancelAllRequests();
+ 
+ 	// wipe the entire cl structure
++	Mod_InvalidateModelLookup();
+ 	memset( &cl, 0, sizeof( cl ));
+ 	MSG_Clear( &cls.netchan.message );
+ 	memset( &clgame.fade, 0, sizeof( clgame.fade ));
+@@ -3470,8 +3471,10 @@
+ 			continue;
+ 
+ 		cl.models[pRes->nIndex] = Mod_LoadWorld( pRes->szFileName, true );
++		Mod_InvalidateModelLookup();
+ 		SetBits( pRes->ucFlags, RES_PRECACHED );
+ 		cl.nummodels = 1;
++		Mod_InvalidateModelLookup();
+ 		break;
+ 	}
+ 
+@@ -3484,7 +3487,9 @@
+ 		if( pRes->type == t_model && pRes->szFileName[0] == '*' )
+ 		{
+ 			cl.models[pRes->nIndex] = Mod_ForName( pRes->szFileName, false, false );
++			Mod_InvalidateModelLookup();
+ 			cl.nummodels = Q_max( cl.nummodels, pRes->nIndex + 1 );
++			Mod_InvalidateModelLookup();
+ 			SetBits( pRes->ucFlags, RES_PRECACHED );
+ 
+ 			if( cl.models[pRes->nIndex] == NULL )
+@@ -3548,11 +3553,13 @@
+ 			if( pRes->nIndex >= 0 && pRes->nIndex < ARRAYSIZE( cl.models ))
+ 			{
+ 				cl.nummodels = Q_max( cl.nummodels, pRes->nIndex + 1 );
++				Mod_InvalidateModelLookup();
+ 				if( pRes->szFileName[0] != '*' )
+ 				{
+ 					if( pRes->nIndex != -1 )
+ 					{
+ 						cl.models[pRes->nIndex] = Mod_ForName( pRes->szFileName, false, true );
++						Mod_InvalidateModelLookup();
+ 
+ 						if( cl.models[pRes->nIndex] == NULL )
+ 						{
+@@ -3598,6 +3605,7 @@
+ 
+ 	// make sure modelcount is in-range
+ 	cl.nummodels = bound( 0, cl.nummodels, MAX_MODELS );
++	Mod_InvalidateModelLookup();
+ 	cl.numfiles = bound( 0, cl.numfiles, MAX_CUSTOM );
+ 
+ 	if( cls.state != ca_active )
