@@ -1,8 +1,9 @@
 /* Native implementations of the Windows services used by the recompiled DLLs.
  * Unknown APIs stop with their name and call site. They never return success.
- * This runtime currently supports a single guest thread; TLS is thread-local.
+ * Native guest workers have independent stacks, TEBs and thread-local values.
  */
 #include "win32.h"
+#include "loader.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <strings.h>
@@ -19,6 +20,8 @@
 #include <wctype.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <math.h>
+#include <stdatomic.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include "nls_tables.h"
 
@@ -29,21 +32,44 @@ extern int rt_cpuid_sse2;
 static int deterministic, trace_enabled;
 static uint32_t heap_next = BHL_HEAP_BASE;
 typedef struct Block { uint32_t address, size, capacity, heap; int used; struct Block *next; } Block;
-static Block *blocks;
+static _Atomic(Block *) blocks;
 static pthread_mutex_t heap_lock = PTHREAD_MUTEX_INITIALIZER;
 static __thread uint32_t last_error, tls_values[1088];
+static __thread uint32_t tls_generations[1088];
+static uint32_t slot_generations[1088];
+static __thread unsigned com_initializations;
 static unsigned char tls_used[1088];
 static uint32_t fls_destructors[1088];
+static pthread_mutex_t tls_lock=PTHREAD_MUTEX_INITIALIZER;
 static uint32_t exception_filter;
 static unsigned disabled_thread_notifications;
+void bhl_set_last_error(uint32_t error){last_error=error;}
+int bhl_thread_notifications_enabled(uint32_t base)
+{
+    unsigned bit=base==0x10000000?1:base==0x30000000?2:base==0x50000000?4:base==0x40000000?8:0;
+    return bit&&!(disabled_thread_notifications&bit);
+}
 static unsigned heaps[256] = {1};
 static uint32_t virtual_next=0x80000000u;
+/* Guest protection metadata uses Windows 4 KiB pages. The backing mapping
+ * remains host-readable data: generated ARM64 lives outside this mapping.
+ * This is not a hardware MMU and does not yet raise every guest access fault. */
+static uint8_t page_protection[1u<<20];
+typedef struct VirtualRegion {uint32_t base,size;} VirtualRegion;
+static VirtualRegion regions[256];
+static void protect_pages(uint32_t p,uint32_t size,uint8_t protection)
+{
+    uint64_t end=(uint64_t)p+size;
+    for(uint64_t page=p>>12;page<(end+4095)/4096;page++)page_protection[page]=protection;
+}
 static uint32_t command_a, command_w, environment_w;
 typedef struct Lock { uint32_t address; pthread_mutex_t mutex; struct Lock *next; } Lock;
 static Lock *locks;
+static pthread_mutex_t lock_registry=PTHREAD_MUTEX_INITIALIZER;
 typedef struct Thunk { char *name; void (*fn)(Ctx *); } Thunk;
 static Thunk dynamic[8192];
-static unsigned dynamic_count;
+static _Atomic unsigned dynamic_count;
+static pthread_mutex_t thunk_lock=PTHREAD_MUTEX_INITIALIZER;
 static void (*import_observer)(Ctx *, uint32_t, int);
 void bhl_set_import_observer(void (*fn)(Ctx *, uint32_t, int)) { import_observer = fn; }
 #define A(n) rt_r32(G_MEM, c->esp + 4 + 4 * (n))
@@ -85,7 +111,7 @@ static int heap_free(uint32_t p)
     return b != NULL;
 }
 int bhl_heap_free(uint32_t p) { return heap_free(p); }
-static Lock *lock_at(uint32_t p) { for (Lock *l = locks; l; l = l->next) if (l->address == p) return l; return NULL; }
+static Lock *lock_at(uint32_t p) { pthread_mutex_lock(&lock_registry);Lock *found=NULL;for (Lock *l = locks; l; l = l->next) if (l->address == p){found=l;break;}pthread_mutex_unlock(&lock_registry);return found; }
 static void missing(Ctx *c, const char *name)
 {
     static __thread char message[256];
@@ -101,10 +127,12 @@ const char *bhl_import_name(uint32_t index)
 uint32_t bhl_thunk(const char *name, void (*fn)(Ctx *))
 {
     for (unsigned i = 0; i < rt_imptab_n; i++) if (!strcmp(rt_imptab[i].name, name) && !fn) return BHL_THUNK_BASE + 16 * i;
-    for (unsigned i = 0; i < dynamic_count; i++) if (!strcmp(dynamic[i].name, name)) return BHL_THUNK_BASE + 16 * (i + rt_imptab_n);
-    if (dynamic_count == sizeof dynamic / sizeof *dynamic) return 0;
-    unsigned i = dynamic_count++;
+    pthread_mutex_lock(&thunk_lock);
+    for (unsigned i = 0; i < dynamic_count; i++) if (!strcmp(dynamic[i].name, name)){uint32_t p=BHL_THUNK_BASE+16*(i+rt_imptab_n);pthread_mutex_unlock(&thunk_lock);return p;}
+    if (dynamic_count == sizeof dynamic / sizeof *dynamic){pthread_mutex_unlock(&thunk_lock);return 0;}
+    unsigned i = dynamic_count;
     dynamic[i] = (Thunk){strdup(name), fn};
+    dynamic_count=i+1;pthread_mutex_unlock(&thunk_lock);
     return BHL_THUNK_BASE + 16 * (i + rt_imptab_n);
 }
 static int wide_ascii(uint32_t ptr, char *dst, size_t cap)
@@ -122,6 +150,7 @@ static uint32_t module_handle(const char *name)
 {
     const char *base=name;for(const char *p=name;*p;p++)if(*p=='/'||*p=='\\')base=p+1;name=base;
     if (!strcasecmp(name, "kernel32.dll") || !strcasecmp(name, "kernel32")) return 0x7c800000;
+    if (!strcasecmp(name, "dsound.dll")) return 0x7c900000;
     if (!strcasecmp(name, "hl.dll")) return 0x10000000;
     if (!strcasecmp(name, "client.dll")) return 0x30000000;
     if (!strcasecmp(name, "vgui.dll")) return 0x40000000;
@@ -266,6 +295,18 @@ void bhl_process_init(Ctx *c)
         environment_w = bhl_heap_alloc(4, 1); /* isolated process has no guest environment entries */
     }
     rt_cpuid_sse2 = 1;
+    protect_pages(BHL_HEAP_BASE,BHL_HEAP_END-BHL_HEAP_BASE,4);
+    protect_pages(BHL_STACK_BASE,BHL_STACK_SIZE,4);protect_pages(BHL_TEB,0x2000,4);
+    for(unsigned k=0;k<bhl_module_count;k++){
+        uint32_t base=bhl_modules[k].base,pe=base+rt_r32(G_MEM,base+0x3c),optional=pe+24;
+        protect_pages(base,rt_r32(G_MEM,optional+60),2);
+        unsigned count=rt_r16(G_MEM,pe+6);uint32_t section=optional+rt_r16(G_MEM,pe+20);
+        for(unsigned i=0;i<count;i++,section+=40){
+            uint32_t flags=rt_r32(G_MEM,section+36);int x=!!(flags&0x20000000),r=!!(flags&0x40000000),w=!!(flags&0x80000000);
+            uint8_t protection=x?(w?0x40:r?0x20:0x10):(w?4:r?2:1);
+            protect_pages(base+rt_r32(G_MEM,section+12),rt_r32(G_MEM,section+8),protection);
+        }
+    }
     for (unsigned i = 0; i < rt_imptab_n; i++) {
         uint32_t target=BHL_THUNK_BASE+i*16;
         if(!strcasecmp(rt_imptab[i].name,"MSVCRT.dll!_adjust_fdiv"))target=bhl_heap_alloc(4,1);
@@ -287,6 +328,20 @@ static void dispatch_import(Ctx *c, uint32_t index)
     const char *name = strchr(qualified, '!');
     extern int bhl_platform_import(Ctx *,const char *);
     if(bhl_platform_import(c,qualified))return;
+    extern int bhl_gdi_import(Ctx *,const char *);
+    if(bhl_gdi_import(c,qualified))return;
+    if(!strcmp(qualified,"ole32.dll!CoInitialize")){
+        if(A(0))RETURN(0x80070057u,1);unsigned previous=com_initializations++;RETURN(previous?1:0,1);
+    }
+    if(!strcmp(qualified,"ole32.dll!CoUninitialize")){
+        if(!com_initializations){missing(c,"unbalanced CoUninitialize");return;}com_initializations--;RETURN(0,0);
+    }
+    if(!strcmp(qualified,"WINMM.dll!mixerGetNumDevs")){
+        /* The native backend exposes a software playback device, with no
+           legacy system mixer/control-panel devices. Buffer volume remains
+           available through its DirectSound interface. */
+        RETURN(0,0);
+    }
     if(!strcmp(qualified,"USER32.dll!SystemParametersInfoA")&&(A(0)==3||A(0)==4)){
         /* Windows global mouse acceleration settings have no per-process Mac
            equivalent. The original client checks this failure and uses its
@@ -304,6 +359,19 @@ static void dispatch_import(Ctx *c, uint32_t index)
         if(CRT("strlen"))RETURN(strlen((char*)G_MEM+A(0)),0);
         if(CRT("strcmp"))RETURN(strcmp((char*)G_MEM+A(0),(char*)G_MEM+A(1)),0);
         if(CRT("strcpy")){strcpy((char*)G_MEM+A(0),(char*)G_MEM+A(1));RETURN(A(0),0);}
+        if(CRT("_ftol")){
+            double value=c->st[c->top];c->top=(c->top+1)&7;uint64_t result;
+            if(!isfinite(value)||value>=9223372036854775808.0||value< -9223372036854775808.0){result=0x8000000000000000ull;c->fsw|=1;}
+            else result=(uint64_t)(int64_t)trunc(value);
+            c->edx=(uint32_t)(result>>32);RETURN((uint32_t)result,0);
+        }
+        if(CRT("floor")||CRT("ceil")||CRT("sin")||CRT("cos")||CRT("sqrt")||CRT("fabs")||CRT("log")||CRT("atan")){
+            double value=rt_rf64(G_MEM,c->esp+4);
+            value=CRT("floor")?floor(value):CRT("ceil")?ceil(value):CRT("sin")?sin(value):CRT("cos")?cos(value):CRT("sqrt")?sqrt(value):CRT("fabs")?fabs(value):CRT("log")?log(value):atan(value);
+            FPUSH(value);RETURN(0,0);
+        }
+        if(CRT("pow")||CRT("fmod")){double a=rt_rf64(G_MEM,c->esp+4),b=rt_rf64(G_MEM,c->esp+12);FPUSH(CRT("pow")?pow(a,b):fmod(a,b));RETURN(0,0);}
+        if(CRT("_CIpow")){double exponent=c->st[c->top];c->top=(c->top+1)&7;c->st[c->top]=pow(c->st[c->top],exponent);RETURN(0,0);}
         if(CRT("_initterm")){
             uint32_t first=A(0),last=A(1);
             if(last<first||last-first>0x10000||(last-first)%4){missing(c,"invalid CRT constructor range");return;}
@@ -319,6 +387,8 @@ static void dispatch_import(Ctx *c, uint32_t index)
     }
     if (!name || strncasecmp(qualified, "KERNEL32.dll!", 13)) { missing(c, qualified); return; }
     name++;
+    extern int bhl_thread_import(Ctx *,const char *);
+    if(bhl_thread_import(c,name))return;
 #define IS(n) (!strcmp(name, n))
     if (IS("GetLastError")) RETURN(last_error, 0);
     if (IS("SetLastError")) { last_error = A(0); rt_w32(G_MEM, c->fs_base + 0x34, last_error); RETURN(0, 1); }
@@ -344,6 +414,7 @@ static void dispatch_import(Ctx *c, uint32_t index)
         rt_w64(G_MEM, A(0), deterministic ? 123456789ull : (uint64_t)ts.tv_sec * 1000000000 + ts.tv_nsec); RETURN(1, 1);
     }
     if (IS("QueryPerformanceFrequency")) { rt_w64(G_MEM, A(0), 1000000000); RETURN(1, 1); }
+    if (IS("GetTickCount")) { struct timespec ts;clock_gettime(CLOCK_MONOTONIC,&ts);RETURN(deterministic?123456:(uint32_t)((uint64_t)ts.tv_sec*1000+ts.tv_nsec/1000000),0); }
     if (IS("EncodePointer") || IS("DecodePointer")) RETURN(A(0) ^ 0x79a4c32d, 1);
     if (IS("SetUnhandledExceptionFilter")) { uint32_t old = exception_filter; exception_filter = A(0); RETURN(old, 1); }
     if (IS("InitializeSListHead")) { rt_w64(G_MEM, A(0), 0); RETURN(0, 1); }
@@ -358,7 +429,7 @@ static void dispatch_import(Ctx *c, uint32_t index)
         pthread_mutexattr_t attr; pthread_mutexattr_init(&attr); pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
         int result = pthread_mutex_init(&l->mutex, &attr); pthread_mutexattr_destroy(&attr);
         if (result) { free(l); last_error = 8; RETURN(0,nargs); }
-        l->address = p; l->next = locks; locks = l;
+        l->address = p;pthread_mutex_lock(&lock_registry);l->next = locks; locks = l;pthread_mutex_unlock(&lock_registry);
         memset(G_MEM + p, 0, 24); rt_w32(G_MEM,p+4,0xffffffff); rt_w32(G_MEM,p+20,nargs>1?A(1):0);
         RETURN(1,nargs);
     }
@@ -368,7 +439,7 @@ static void dispatch_import(Ctx *c, uint32_t index)
         uint32_t address=l->address;
         if (IS("EnterCriticalSection")) {
             result = pthread_mutex_lock(&l->mutex);
-            if(!result){rt_w32(G_MEM,address+4,rt_r32(G_MEM,address+4)+1);rt_w32(G_MEM,address+8,rt_r32(G_MEM,address+8)+1);rt_w32(G_MEM,address+12,rt_r32(G_MEM,c->fs_base+0x24));}
+            if(!result){extern void bhl_thread_critical(int);bhl_thread_critical(1);rt_w32(G_MEM,address+4,rt_r32(G_MEM,address+4)+1);rt_w32(G_MEM,address+8,rt_r32(G_MEM,address+8)+1);rt_w32(G_MEM,address+12,rt_r32(G_MEM,c->fs_base+0x24));}
         }
         else if (IS("LeaveCriticalSection")) {
             uint32_t depth=rt_r32(G_MEM,address+8);
@@ -376,28 +447,32 @@ static void dispatch_import(Ctx *c, uint32_t index)
             rt_w32(G_MEM,address+4,rt_r32(G_MEM,address+4)-1);rt_w32(G_MEM,address+8,depth-1);
             if(depth==1)rt_w32(G_MEM,address+12,0);
             result = pthread_mutex_unlock(&l->mutex);
+            if(!result){extern void bhl_thread_critical(int);bhl_thread_critical(-1);}
         }
         else {
             result = pthread_mutex_destroy(&l->mutex);
-            if (!result) { Lock **p = &locks; while (*p != l) p = &(*p)->next; *p = l->next; free(l); }
+            if (!result) {pthread_mutex_lock(&lock_registry);Lock **p = &locks; while (*p != l) p = &(*p)->next; *p = l->next;pthread_mutex_unlock(&lock_registry);free(l);}
         }
         if (result) missing(c, "critical section operation failed");
         RETURN(0, 1);
     }
     if (IS("TlsAlloc") || IS("FlsAlloc")) {
-        for (unsigned i=0;i<1088;i++) if (!tls_used[i]) { tls_used[i]=1; tls_values[i]=0; fls_destructors[i]=IS("FlsAlloc")?A(0):0; RETURN(i, IS("FlsAlloc") ? 1 : 0); }
+        pthread_mutex_lock(&tls_lock);
+        for (unsigned i=0;i<1088;i++) if (!tls_used[i]) { tls_used[i]=1;tls_generations[i]=++slot_generations[i];tls_values[i]=0;fls_destructors[i]=IS("FlsAlloc")?A(0):0;pthread_mutex_unlock(&tls_lock);RETURN(i, IS("FlsAlloc") ? 1 : 0); }
+        pthread_mutex_unlock(&tls_lock);
         last_error=8; RETURN(0xffffffff, IS("FlsAlloc") ? 1 : 0);
     }
-    if (IS("TlsGetValue") || IS("FlsGetValue")) { uint32_t i=A(0); last_error=i<1088&&tls_used[i]?0:87; RETURN(last_error?0:tls_values[i],1); }
-    if (IS("TlsSetValue") || IS("FlsSetValue")) { uint32_t i=A(0); if(i>=1088||!tls_used[i]) {last_error=87;RETURN(0,2);} tls_values[i]=A(1); RETURN(1,2); }
+    if (IS("TlsGetValue") || IS("FlsGetValue")) { uint32_t i=A(0);pthread_mutex_lock(&tls_lock);last_error=i<1088&&tls_used[i]?0:87;uint32_t generation=last_error?0:slot_generations[i];pthread_mutex_unlock(&tls_lock);if(!last_error&&tls_generations[i]!=generation){tls_values[i]=0;tls_generations[i]=generation;}RETURN(last_error?0:tls_values[i],1); }
+    if (IS("TlsSetValue") || IS("FlsSetValue")) { uint32_t i=A(0);pthread_mutex_lock(&tls_lock);int valid=i<1088&&tls_used[i];uint32_t generation=valid?slot_generations[i]:0;pthread_mutex_unlock(&tls_lock);if(!valid){last_error=87;RETURN(0,2);}tls_generations[i]=generation;tls_values[i]=A(1);RETURN(1,2); }
     if (IS("TlsFree") || IS("FlsFree")) {
-        uint32_t i=A(0); if(i>=1088||!tls_used[i]) {last_error=87;RETURN(0,1);}
-        if(IS("FlsFree") && fls_destructors[i] && tls_values[i]) {
+        uint32_t i=A(0);pthread_mutex_lock(&tls_lock);int valid=i<1088&&tls_used[i];uint32_t destructor=valid?fls_destructors[i]:0;pthread_mutex_unlock(&tls_lock);
+        if(!valid){last_error=87;RETURN(0,1);}
+        if(IS("FlsFree") && destructor && tls_values[i]) {
             Ctx child=*c; child.esp-=8;
             rt_w32(G_MEM,child.esp,0x00100000);rt_w32(G_MEM,child.esp+4,tls_values[i]);
-            tls_values[i]=0;rt_call(&child,fls_destructors[i]);
+            tls_values[i]=0;rt_call(&child,destructor);
         }
-        tls_used[i]=0;tls_values[i]=0;fls_destructors[i]=0;RETURN(1,1);
+        pthread_mutex_lock(&tls_lock);tls_used[i]=0;fls_destructors[i]=0;pthread_mutex_unlock(&tls_lock);tls_values[i]=0;RETURN(1,1);
     }
     if (IS("GetProcessHeap")) RETURN(0x01000000, 0);
     if (IS("HeapCreate")) {
@@ -420,11 +495,39 @@ static void dispatch_import(Ctx *c, uint32_t index)
     }
     if (IS("VirtualAlloc")) {
         uint32_t p=A(0),size=A(1),type=A(2),protect=A(3);
-        if(!size||size>0x10000000||protect!=4||(type&~0x3000u)){missing(c,"VirtualAlloc mode");return;}
-        uint32_t rounded=(size+65535)&~65535u;
-        if(!p){if(rounded>0xf0000000u-virtual_next){last_error=8;RETURN(0,4);}p=virtual_next;virtual_next+=rounded;memset(G_MEM+p,0,rounded);}
-        else if(p<0x80000000u||(uint64_t)p+size>virtual_next){last_error=487;RETURN(0,4);}
-        RETURN(p,4);
+        if(!size||size>0x10000000||protect!=4||!type||(type&~0x3000u)){missing(c,"VirtualAlloc mode");return;}
+        VirtualRegion *region=NULL;
+        if(!p){
+            uint32_t rounded=(size+65535)&~65535u;
+            if(rounded>0xf0000000u-virtual_next){last_error=8;RETURN(0,4);}
+            for(unsigned i=0;i<256;i++)if(!regions[i].size){region=&regions[i];break;}if(!region){last_error=8;RETURN(0,4);}
+            p=virtual_next;virtual_next+=rounded;*region=(VirtualRegion){p,rounded};
+        }else{
+            for(unsigned i=0;i<256;i++)if(regions[i].size&&p>=regions[i].base&&(uint64_t)p+size<=(uint64_t)regions[i].base+regions[i].size){region=&regions[i];break;}
+            if(!region||type&0x2000){last_error=487;RETURN(0,4);}
+        }
+        uint32_t first=p&~4095u;uint64_t end=((uint64_t)p+size+4095)&~4095ull;
+        if(type&0x1000)for(uint64_t page=first;page<end;page+=4096)if(!page_protection[page>>12]){memset(G_MEM+page,0,4096);page_protection[page>>12]=protect;}
+        RETURN(first,4);
+    }
+    if(IS("VirtualFree")){
+        uint32_t p=A(0),size=A(1),type=A(2);VirtualRegion *region=NULL;
+        for(unsigned i=0;i<256;i++)if(regions[i].size&&p>=regions[i].base&&(uint64_t)p+size<=(uint64_t)regions[i].base+regions[i].size){region=&regions[i];break;}
+        if(!region){last_error=487;RETURN(0,3);}
+        if(type==0x8000){if(p!=region->base||size){last_error=87;RETURN(0,3);}protect_pages(p,region->size,0);region->size=0;RETURN(1,3);}
+        if(type==0x4000){if(!size){if(p!=region->base){last_error=87;RETURN(0,3);}size=region->size;}protect_pages(p,size,0);RETURN(1,3);}
+        last_error=87;RETURN(0,3);
+    }
+    if(IS("VirtualProtect")){
+        uint32_t p=A(0),size=A(1),mode=A(2),old=A(3);uint64_t end=(uint64_t)p+size;
+        if(!size||end>0x100000000ull||!old||!(mode==1||mode==2||mode==4||mode==0x10||mode==0x20||mode==0x40)){last_error=87;RETURN(0,4);}
+        if(p>=0x80000000u&&p<virtual_next){int contained=0;for(unsigned i=0;i<256;i++)if(regions[i].size&&p>=regions[i].base&&end<=(uint64_t)regions[i].base+regions[i].size){contained=1;break;}if(!contained){last_error=487;RETURN(0,4);}}
+        for(uint64_t page=p>>12;page<(end+4095)/4096;page++)if(!page_protection[page]){last_error=487;RETURN(0,4);}
+        uint32_t previous=page_protection[p>>12];protect_pages(p,size,mode);rt_w32(G_MEM,old,previous);RETURN(1,4);
+    }
+    if(IS("VirtualLock")||IS("VirtualUnlock")){
+        uint32_t p=A(0),size=A(1);if(!size||(uint64_t)p+size>0x100000000ull){last_error=87;RETURN(0,2);}
+        int result=IS("VirtualLock")?mlock(G_MEM+p,size):munlock(G_MEM+p,size);if(result)last_error=1453;RETURN(result==0,2);
     }
     if (IS("HeapAlloc")) {
         if (A(0)<0x01000000 || A(0)>=0x01000100 || !heaps[A(0)-0x01000000] || (A(1)&~9u)) { missing(c,"HeapAlloc flags/heap"); return; }
@@ -458,7 +561,7 @@ static void dispatch_import(Ctx *c, uint32_t index)
         if(!A(0)){if(IS("GetModuleHandleA"))RETURN(0x00400000,1);last_error=87;RETURN(0,1);}
         uint32_t h=module_handle((char*)G_MEM+A(0));if(!h)last_error=126;
         if(trace_enabled)fprintf(stderr,"  module %s -> %08x\n",G_MEM+A(0),h);
-        if(h&&h!=0x7c800000&&IS("LoadLibraryA")){
+        if(h>=0x10000000&&h<=0x50000000&&IS("LoadLibraryA")){
             extern void bhl_attach(const char *);const char *module=h==0x10000000?"hl.dll":h==0x30000000?"client.dll":h==0x40000000?"vgui.dll":"fmod.dll";
             bhl_attach(module);
         }
@@ -475,6 +578,7 @@ static void dispatch_import(Ctx *c, uint32_t index)
     }
     if (IS("GetProcAddress")) {
         if(A(1)<0x10000) {last_error=127;RETURN(0,2);}
+        if(A(0)==0x7c900000){extern uint32_t bhl_dsound_export(const char *);uint32_t target=bhl_dsound_export((char*)G_MEM+A(1));if(!target)last_error=127;RETURN(target,2);}
         if(A(0)!=0x7c800000) {
             extern uint32_t bhl_export(const char *,const char *);
             uint32_t h=A(0);const char *module=h==0x10000000?"hl.dll":h==0x30000000?"client.dll":h==0x40000000?"vgui.dll":h==0x50000000?"fmod.dll":NULL;
@@ -484,7 +588,7 @@ static void dispatch_import(Ctx *c, uint32_t index)
         if(trace_enabled)fprintf(stderr,"  resolve %s\n",full);
         RETURN(bhl_thunk(full,NULL),2);
     }
-    if (IS("FreeLibrary")) { if(A(0)!=0x7c800000) {last_error=6;RETURN(0,1);} RETURN(1,1); }
+    if (IS("FreeLibrary")) { if(A(0)!=0x7c800000&&A(0)!=0x7c900000) {last_error=6;RETURN(0,1);} RETURN(1,1); }
     if (IS("GetStartupInfoW")||IS("GetStartupInfoA")) { uint32_t p=A(0);memset(G_MEM+p,0,68);rt_w32(G_MEM,p,68); RETURN(0,1); }
     if (IS("GetCommandLineA")) RETURN(command_a,0);
     if (IS("GetCommandLineW")) RETURN(command_w,0);
@@ -543,13 +647,19 @@ static void dispatch_import(Ctx *c, uint32_t index)
     if (IS("CreateFileW")||IS("CreateFileA")) {
         char path[4096];if(!guest_path(A(0),IS("CreateFileW"),path))RETURN(0xffffffff,7);
         uint32_t access=A(1),share=A(2),disposition=A(4),attributes=A(5);
-        if(A(3)||A(6)||(attributes&0x40000000u)){missing(c,"CreateFile security/template/overlapped mode");return;}
+        int inherit=0;
+        if(A(3)){
+            uint32_t sa=A(3);if(rt_r32(G_MEM,sa)!=12){last_error=87;RETURN(0xffffffff,7);}
+            if(rt_r32(G_MEM,sa+4)){missing(c,"CreateFile security descriptor");return;}inherit=!!rt_r32(G_MEM,sa+8);
+        }
+        if(A(6)||(attributes&0x40000000u)){missing(c,"CreateFile template/overlapped mode");return;}
         /* Normal/archive and sequential/random access are supported hints.
            Do not silently ignore delete-on-close, encryption or backup mode. */
         if(attributes&~0x180000a0u){missing(c,"CreateFile attributes");return;}
         if(access&~0xc0000000u||share&~7u){missing(c,"CreateFile access/share mode");return;}
         if((disposition==2||disposition==5)&&!(access&0x40000000u)){last_error=5;RETURN(0xffffffff,7);}
         int mode=(access&0x40000000)?((access&0x80000000)?O_RDWR:O_WRONLY):O_RDONLY;
+        if(!inherit)mode|=O_CLOEXEC;
         if(disposition==1)mode|=O_CREAT|O_EXCL;else if(disposition==2)mode|=O_CREAT|O_TRUNC;
         else if(disposition==4)mode|=O_CREAT;else if(disposition==5)mode|=O_TRUNC;else if(disposition!=3){last_error=87;RETURN(0xffffffff,7);}
         for(unsigned i=0;i<256;i++)if(files[i].used&&!strcmp(files[i].path,path)){
@@ -597,7 +707,15 @@ static void dispatch_import(Ctx *c, uint32_t index)
 
 void rt_import(Ctx *c, uint32_t index)
 {
+    extern void bhl_thread_checkpoint(void);bhl_thread_checkpoint();
     if(import_observer)import_observer(c,index,0);
     dispatch_import(c,index);
     if(import_observer)import_observer(c,index,1);
+}
+void bhl_fls_thread_exit(void)
+{
+    for(unsigned i=0;i<1088;i++){
+        pthread_mutex_lock(&tls_lock);uint32_t fn=tls_used[i]&&tls_generations[i]==slot_generations[i]?fls_destructors[i]:0;pthread_mutex_unlock(&tls_lock);
+        uint32_t value=tls_values[i];tls_values[i]=0;if(fn&&value)bhl_invoke(fn,&value,1,1);
+    }
 }

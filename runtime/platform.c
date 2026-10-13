@@ -38,6 +38,7 @@ int bhl_platform_import(Ctx *c,const char *qualified)
         return 0;
     }
     if(!strncasecmp(qualified,"USER32.dll!",11)){
+        if(!strcmp(name,"GetForegroundWindow"))STDCALL(SDL_GetKeyboardFocus()?0x7e100000u:0,0);
         if(!strcmp(name,"GetCursorPos")){if(!A(0))STDCALL(0,1);int x,y;SDL_GetGlobalMouseState(&x,&y);rt_w32(G_MEM,A(0),x);rt_w32(G_MEM,A(0)+4,y);STDCALL(1,1);}
         if(!strcmp(name,"SetCursorPos")){
             SDL_Window *window=SDL_GetMouseFocus();if(!window)STDCALL(0,2);int x,y;SDL_GetWindowPosition(window,&x,&y);

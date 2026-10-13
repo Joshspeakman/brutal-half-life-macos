@@ -59,7 +59,7 @@ def main():
     description += 'const BhlModule bhl_modules[] = {\n' + ''.join(rows) + '};\n'
     description += f'const unsigned bhl_module_count={len(metadata)};\n'
     (out / "modules.c").write_text(description)
-    sources += [ROOT / "runtime/rt.c", ROOT / "runtime/win32.c", ROOT / "runtime/loader.c", ROOT / "runtime/platform.c", ROOT / "tests/abi_layout.c", out / "tables.c", out / "modules.c"]
+    sources += [ROOT / "runtime/rt.c", ROOT / "runtime/win32.c", ROOT / "runtime/loader.c", ROOT / "runtime/platform.c", ROOT / "runtime/directsound.c", ROOT / "runtime/threading.c", ROOT / "runtime/gdi.c", ROOT / "tests/abi_layout.c", out / "tables.c", out / "modules.c"]
     sdl_cflags=shlex.split(subprocess.check_output(['pkg-config','--cflags','sdl2'],text=True))
     sdl_libs=shlex.split(subprocess.check_output(['pkg-config','--libs','sdl2'],text=True))
     flags = ["clang", "-arch", "arm64", "-std=gnu11", f"-O{args.opt}", "-g",
@@ -68,7 +68,7 @@ def main():
     headers = b''.join(p.read_bytes() for p in sorted((ROOT / "runtime").glob("*.h")))
     compiler = subprocess.check_output(["clang", "--version"])
     def compile_one(source):
-        compile_flags=flags+(sdl_cflags if source.name=='platform.c' else [])
+        compile_flags=flags+(sdl_cflags if source.name in ('platform.c','directsound.c') else [])
         extra = (out / 'nls_tables.h').read_bytes() if source.name == 'win32.c' else b''
         digest = hashlib.sha256(source.read_bytes() + headers + extra + compiler + repr(compile_flags).encode()).hexdigest()
         obj = out / (source.parent.name + "_" + source.stem + ".o")
@@ -83,7 +83,7 @@ def main():
     with ThreadPoolExecutor(max_workers=min(4, os.cpu_count() or 1)) as pool:
         objects = list(pool.map(compile_one, sources))
     staged = out / "libbhl.new.dylib"
-    subprocess.run(["clang", "-arch", "arm64", "-dynamiclib", *map(str, objects), *sdl_libs, "-liconv", "-framework", "CoreFoundation",
+    subprocess.run(["clang", "-arch", "arm64", "-dynamiclib", *map(str, objects), *sdl_libs, "-liconv", "-framework", "CoreFoundation", "-framework", "CoreText", "-framework", "CoreGraphics",
                     "-install_name", "@rpath/libbhl.dylib", "-o", str(staged)], check=True)
     subprocess.run(["codesign", "--force", "--sign", "-", str(staged)], check=True)
     staged.replace(out / "libbhl.dylib")

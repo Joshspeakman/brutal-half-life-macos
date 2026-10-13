@@ -25,8 +25,12 @@ names; preparation now patches only the original base field and fixups.
 The native loader verifies prepared-image hashes and loads PE data sections.
 It never executes PE machine code. Generated functions and adapters compile
 to ARM64. Unsupported instructions and missing callbacks fail explicitly.
-The runtime currently supports one guest thread; audio worker lifetimes and
-thread/TLS isolation remain to be implemented.
+Guest threads execute translated code on native pthreads with separate stacks,
+TEBs, TLS/FLS values and DLL thread notifications. Events, waits and recursive
+locks support the original FMOD workers. TerminateThread uses cooperative
+cancellation at API boundaries, deferred while guest critical sections are
+held; it is not Windows asynchronous thread termination. Unsupported thread
+behaviors remain explicit failures.
 
 ## Tests and their limits
 
@@ -50,7 +54,11 @@ modules and virtual allocations need broader coverage for later execution.
 Independent service tests cover all 256 CP1252 round-trips, composition,
 best-fit/default replacement, buffer sizing, private heap ownership and
 destruction, recursive locks, Unicode file names, binary I/O, sharing and
-directory boundaries. This is not a full Win32 conformance suite.
+directory boundaries. They also check virtual reserve/commit/decommit,
+protection metadata and the legacy CRT's 64-bit float-to-integer conversion.
+Protection metadata is not a full hardware MMU: the host mapping does not
+enforce every guest protection on direct translated memory accesses. This is
+not a full Win32 conformance suite.
 
 The dedicated-engine test checks GameInit, PM_Init and delta registration,
 then intro-map activation and at least ten frames. It stops a bounded session
@@ -58,9 +66,23 @@ intentionally. Because Xash can catch an abort and exit zero, tests require
 stage markers and reject bridge/crash messages as well as inspecting status.
 
 The full engine with a null renderer passes client Initialize, weapon-event
-registration and movement initialization. HUD_Init reaches FMOD and stops at
-`WINMM.dll!mixerGetNumDevs`. Audio calls are not discarded or replaced with
-success. Neither a rendered frame nor audible output has been verified.
+registration, movement initialization, VGUI construction and HUD_Init. The
+intro map activates and the client begins its local connection. Model/BSP
+pointer conversion currently stops that path before a player session.
+
+Four native PCM tests cover 8/16-bit samples, mono/stereo, looping, volume,
+pan, playback rate, wrapping locks and stopped output. Four thread tests cover
+separate TEB/TLS state, suspended startup, event reset modes and cooperative
+termination. The original FMOD passes initialization at 44.1 kHz, worker
+execution, device-frame advancement and shutdown. These use SDL's dummy
+driver; decoded game music and audible output remain unverified.
+
+The VGUI fixture executes the original App/Label/SurfaceBase constructors,
+font measurement and glyph extraction, then records native drawing calls.
+It checks nonempty glyph alpha, drawing bounds and two surface lifecycles.
+The font adapter maps the GDI memory-DC subset to CoreText and 32-bit DIBs.
+This does not establish Windows-identical font metrics or visual fidelity.
+No displayed game frame or interactive GUI has been verified yet.
 
 ## Engine boundary
 
@@ -81,13 +103,13 @@ SDL input. macOS system mouse preferences are not changed.
 
 ## Work required for the complete conversion
 
-1. **Audio:** implement the actual FMOD output path, devices, buffers,
-   synchronization, worker lifetimes and errors. The client explicitly
-   requests DirectSound; map that backend or adapt it with behavior tests.
-   Verify music, effects, loops, pause/resume and shutdown audibly.
-2. **GUI:** bridge guest VGUI App/Surface objects to native drawing/input,
-   including fonts, cursor, clipping and lifecycle. Guest C++ objects and
-   vtables must remain in guest memory.
+1. **Audio:** audit PCM buffer locking under concurrent writes, reference
+   lifetimes and remaining DirectSound controls. Verify actual decoded music,
+   effects, loops, pause/resume and shutdown audibly.
+2. **GUI:** compare font metrics and appearance, exercise interactive menus,
+   test nested clipping/cursor/input behavior and audit guest UI allocations
+   across level/restart cycles. Guest C++ objects and vtables remain in guest
+   memory; only OS-facing App and engine-owned Surface methods cross to native.
 3. **Rendering/client:** finish triangle/effects/event/studio APIs, models,
    entities, view calculation, HUD, particles, weapon animation, fades and
    input prediction. Test with a real renderer after headless integration.

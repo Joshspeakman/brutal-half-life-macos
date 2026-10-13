@@ -108,6 +108,32 @@ class Services(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'unimplemented Windows behavior'):
             self.api('BhlDeliberatelyMissingAPI')
 
+    def test_virtual_reserve_commit_protection_and_decommit(self):
+        p=self.api('VirtualAlloc',0,8192,0x2000,4);self.assertNotEqual(p,0)
+        old=self.n.alloc(4)
+        self.assertEqual(self.api('VirtualProtect',p,4096,2,old),0)
+        self.assertEqual(self.api('GetLastError'),487)
+        self.assertEqual(self.api('VirtualAlloc',p+4096,4096,0x1000,4),p+4096)
+        self.n.write(p+4096,b'changed')
+        self.assertEqual(self.api('VirtualProtect',p+4096,4096,0x20,old),1)
+        self.assertEqual(self.words(old,1),(4,))
+        self.assertEqual(self.api('VirtualProtect',p+4096,4096,4,old),1)
+        self.assertEqual(self.words(old,1),(0x20,))
+        self.assertEqual(self.api('VirtualFree',p+4096,4096,0x4000),1)
+        self.assertEqual(self.api('VirtualProtect',p+4096,4096,2,old),0)
+        self.assertEqual(self.api('VirtualAlloc',p+4096,4096,0x1000,4),p+4096)
+        self.assertEqual(self.n.read(p+4096,7),b'\0'*7)
+        self.assertEqual(self.api('VirtualFree',p,4096,0x8000),0)
+        self.assertEqual(self.api('VirtualFree',p,0,0x8000),1)
+
+    def test_legacy_ftol_truncates_and_returns_64_bits(self):
+        fn=self.n.lib.bhl_thunk(b'MSVCRT.dll!_ftol',None)
+        for value,expected in [(1.9,1),(-1.9,-1),(2**40+.75,2**40),(-2**40-.75,-2**40),(float('nan'),-(2**63))]:
+            self.n.context.top=0;self.n.context.st[0]=value
+            low=self.n.call(fn);result=(self.n.context.edx<<32)|low
+            self.assertEqual(result,expected&0xffffffffffffffff)
+            self.assertEqual(self.n.context.top,1)
+
 
 if __name__ == '__main__':
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(Services)

@@ -19,6 +19,8 @@ struct hull_s;
 #include "demo_api.h"
 #include "net_api.h"
 #include "ivoicetweak.h"
+#include "screenfade.h"
+#include "con_nprint.h"
 #include <stdio.h>
 #include <stdlib.h>
 struct mstudioevent_s;
@@ -71,6 +73,38 @@ static uint32_t cvar_copy(cvar_t *h)
     return p->guest;
 }
 static void sync_cvars(void){for(CvarCopy *p=cvars;p;p=p->next)cvar_copy(p->host);}
+/* The scalar entity prefix has the same layout; only its final pointers grow
+   on ARM64. A stable guest allocation preserves entity pointer identity. */
+typedef struct BhlClientEntity {
+    int index,player;entity_state_t baseline,prevstate,curstate;
+    int current_position;position_history_t ph[64];mouth_t mouth;latchedvars_t latched;
+    float lastmove;vec3_t origin,angles,attachment[4];int trivial_accept;
+    uint32_t model,efrag,topnode;float syncbase;int visframe;colorVec cvFloorColor;
+} BhlClientEntity;
+_Static_assert(sizeof(entity_state_t)==340,"entity state ABI");
+_Static_assert(offsetof(BhlClientEntity,model)==2964,"guest client entity prefix");
+_Static_assert(sizeof(BhlClientEntity)==3000,"guest client entity size");
+typedef struct EntityCopy {cl_entity_t *host;uint32_t guest;struct EntityCopy *next;} EntityCopy;
+static EntityCopy *entities;
+typedef struct TextCopy {client_textmessage_t *host;uint32_t guest,name,message;struct TextCopy *next;} TextCopy;
+static TextCopy *texts;
+static uint32_t text_copy(client_textmessage_t *h)
+{
+    if(!h)return 0;TextCopy *p=texts;while(p&&p->host!=h)p=p->next;
+    if(!p){p=calloc(1,sizeof *p);p->host=h;p->guest=bhl_heap_alloc(44,1);p->next=texts;texts=p;}
+    memcpy(G_MEM+p->guest,h,36);
+    if(!p->name||strcmp(gs(p->name),h->pName?h->pName:"")){bhl_heap_free(p->name);p->name=copy_string(h->pName?h->pName:"");}
+    if(!p->message||strcmp(gs(p->message),h->pMessage?h->pMessage:"")){bhl_heap_free(p->message);p->message=copy_string(h->pMessage?h->pMessage:"");}
+    rt_w32(G_MEM,p->guest+36,p->name);rt_w32(G_MEM,p->guest+40,p->message);return p->guest;
+}
+static uint32_t entity_copy(cl_entity_t *h)
+{
+    if(!h)return 0;EntityCopy *p=entities;while(p&&p->host!=h)p=p->next;
+    if(!p){p=calloc(1,sizeof *p);p->host=h;p->guest=bhl_heap_alloc(sizeof(BhlClientEntity),1);p->next=entities;entities=p;}
+    BhlClientEntity *g=(void*)(G_MEM+p->guest);memcpy(g,h,offsetof(BhlClientEntity,model));
+    if(h->model||h->efrag||h->topnode)client_missing("client entity model/BSP pointers");
+    g->model=g->efrag=g->topnode=0;g->syncbase=h->syncbase;g->visframe=h->visframe;g->cvFloorColor=h->cvFloorColor;return p->guest;
+}
 static void client_dispatch(Ctx *c,unsigned slot)
 {
     if(getenv("BHL_BRIDGE_TRACE"))fprintf(stderr,"client engine %s\n",client_engine_names[slot]);
@@ -93,6 +127,20 @@ static void client_dispatch(Ctx *c,unsigned slot)
     case BHL_CL_pfnGetScreenInfo:{_Static_assert(sizeof(SCREENINFO)==532,"screen info ABI");RET(engine.pfnGetScreenInfo((void*)(G_MEM+A(0))));}
     case BHL_CL_pfnSPR_GetList:{int count=0;client_sprite_t *list=engine.pfnSPR_GetList(gs(A(0)),&count);if(count<0||count>65536)abort();if(A(1))rt_w32(G_MEM,A(1),count);RET(copy_bytes(list,count*sizeof *list));}
     case BHL_CL_VGui_GetPanel:{void *panel=engine.VGui_GetPanel();if((uintptr_t)panel>UINT32_MAX)client_missing("native VGUI object cannot be used by the guest client");RET((uintptr_t)panel);}
+    case BHL_CL_GetEntityByIndex:RET(entity_copy(engine.GetEntityByIndex(A(0))));
+    case BHL_CL_GetLocalPlayer:RET(entity_copy(engine.GetLocalPlayer()));
+    case BHL_CL_GetViewModel:RET(entity_copy(engine.GetViewModel()));
+    case BHL_CL_pfnTextMessageGet:RET(text_copy(engine.pfnTextMessageGet(gs(A(0)))));
+    case BHL_CL_pfnGetPlayerInfo:{
+        hud_player_info_t h={0};engine.pfnGetPlayerInfo(A(0),&h);uint32_t p=A(1);memset(G_MEM+p,0,32);
+        rt_w32(G_MEM,p,copy_string(h.name));rt_w16(G_MEM,p+4,h.ping);G_MEM[p+6]=h.thisplayer;G_MEM[p+7]=h.spectator;G_MEM[p+8]=h.packetloss;
+        rt_w32(G_MEM,p+12,copy_string(h.model));rt_w16(G_MEM,p+16,h.topcolor);rt_w16(G_MEM,p+18,h.bottomcolor);rt_w64(G_MEM,p+24,h.m_nSteamID);RET(0);
+    }
+    case BHL_CL_pfnSetCrosshair:{wrect_t rect;memcpy(&rect,G_MEM+c->esp+8,sizeof rect);engine.pfnSetCrosshair(A(0),rect,A(5),A(6),A(7));RET(0);}
+    case BHL_CL_Con_NXPrintf:{char text[8192];format_guest(text,gs(A(1)),c->esp+12);engine.Con_NXPrintf((con_nprint_t*)gs(A(0)),"%s",text);RET(0);}
+    case BHL_CL_pfnGetScreenFade:{_Static_assert(sizeof(screenfade_t)==24,"fade ABI");engine.pfnGetScreenFade((screenfade_t*)gs(A(0)));RET(0);}
+    case BHL_CL_pfnSetScreenFade:engine.pfnSetScreenFade((screenfade_t*)gs(A(0)));RET(0);
+    case BHL_CL_pfnGetMousePos:engine.pfnGetMousePos((void*)gs(A(0)));RET(0);
 #include "client_scalar_callbacks.h"
     default:client_missing(client_engine_names[slot]);
     }
@@ -113,6 +161,46 @@ EXPORT void IN_ActivateMouse(void){invoke("IN_ActivateMouse",NULL,0);}
 EXPORT void IN_DeactivateMouse(void){invoke("IN_DeactivateMouse",NULL,0);}
 EXPORT void IN_ClearStates(void){invoke("IN_ClearStates",NULL,0);}
 EXPORT void IN_Accumulate(void){invoke("IN_Accumulate",NULL,0);}
+EXPORT void CAM_Think(void){invoke("CAM_Think",NULL,0);}
+EXPORT int CL_IsThirdPerson(void){return invoke("CL_IsThirdPerson",NULL,0);}
+EXPORT void IN_MouseEvent(int state){uint32_t a=state;invoke("IN_MouseEvent",&a,1);}
+EXPORT void HUD_DrawNormalTriangles(void){invoke("HUD_DrawNormalTriangles",NULL,0);}
+EXPORT void HUD_DrawTransparentTriangles(void){invoke("HUD_DrawTransparentTriangles",NULL,0);}
+EXPORT void HUD_CreateEntities(void){invoke("HUD_CreateEntities",NULL,0);}
+EXPORT void HUD_VoiceStatus(int index,qboolean talking){uint32_t a[]={index,talking};invoke("HUD_VoiceStatus",a,2);}
+EXPORT int HUD_Key_Event(int event,int key,const char *binding)
+{uint32_t p=copy_string(binding),a[]={event,key,p};int r=invoke("HUD_Key_Event",a,3);bhl_heap_free(p);return r;}
+EXPORT char HUD_PlayerMoveTexture(char *name)
+{uint32_t p=copy_string(name);char r=invoke("HUD_PlayerMoveTexture",&p,1);bhl_heap_free(p);return r;}
+EXPORT void CL_CameraOffset(float *offset)
+{uint32_t p=copy_bytes(offset,12);invoke("CL_CameraOffset",&p,1);memcpy(offset,G_MEM+p,12);bhl_heap_free(p);}
+EXPORT void HUD_ChatInputPosition(int *x,int *y)
+{uint32_t p=bhl_heap_alloc(8,1),a[]={p,p+4};rt_w32(G_MEM,p,*x);rt_w32(G_MEM,p+4,*y);invoke("HUD_ChatInputPosition",a,2);*x=rt_r32(G_MEM,p);*y=rt_r32(G_MEM,p+4);bhl_heap_free(p);}
+EXPORT void HUD_DirectorMessage(int size,void *buffer)
+{if(size<0)abort();uint32_t p=copy_bytes(buffer,size),a[]={size,p};invoke("HUD_DirectorMessage",a,2);bhl_heap_free(p);}
+EXPORT void Demo_ReadBuffer(int size,byte *buffer)
+{if(size<0)abort();uint32_t p=copy_bytes(buffer,size),a[]={size,p};invoke("Demo_ReadBuffer",a,2);bhl_heap_free(p);}
+EXPORT int HUD_UpdateClientData(client_data_t *data,float time)
+{_Static_assert(sizeof(client_data_t)==32,"client data ABI");uint32_t p=copy_bytes(data,sizeof *data),a[]={p,0};memcpy(a+1,&time,4);int r=invoke("HUD_UpdateClientData",a,2);memcpy(data,G_MEM+p,sizeof *data);bhl_heap_free(p);return r;}
+EXPORT void CL_CreateMove(float time,usercmd_t *cmd,int active)
+{_Static_assert(sizeof(usercmd_t)==52,"usercmd ABI");uint32_t p=copy_bytes(cmd,sizeof *cmd),a[]={0,p,active};memcpy(a,&time,4);invoke("CL_CreateMove",a,3);memcpy(cmd,G_MEM+p,sizeof *cmd);bhl_heap_free(p);}
+EXPORT void HUD_TxferLocalOverrides(entity_state_t *state,const clientdata_t *data)
+{uint32_t s=copy_bytes(state,sizeof *state),d=copy_bytes(data,sizeof *data),a[]={s,d};invoke("HUD_TxferLocalOverrides",a,2);memcpy(state,G_MEM+s,sizeof *state);bhl_heap_free(s);bhl_heap_free(d);}
+EXPORT void HUD_ProcessPlayerState(entity_state_t *dst,const entity_state_t *src)
+{uint32_t d=copy_bytes(dst,sizeof *dst),s=src==dst?d:copy_bytes(src,sizeof *src),a[]={d,s};invoke("HUD_ProcessPlayerState",a,2);memcpy(dst,G_MEM+d,sizeof *dst);bhl_heap_free(d);if(s!=d)bhl_heap_free(s);}
+EXPORT void HUD_TxferPredictionData(entity_state_t *ps,const entity_state_t *pps,clientdata_t *pcd,const clientdata_t *ppcd,weapon_data_t *wd,const weapon_data_t *pwd)
+{
+    _Static_assert(sizeof(clientdata_t)==476,"prediction client data ABI");_Static_assert(sizeof(weapon_data_t)==88,"weapon data ABI");
+    unsigned sizes[]={sizeof *ps,sizeof *pcd,64*sizeof *wd};void *dst[]={ps,pcd,wd};const void *src[]={pps,ppcd,pwd};uint32_t a[6];
+    for(unsigned i=0;i<3;i++){a[2*i]=copy_bytes(dst[i],sizes[i]);a[2*i+1]=dst[i]==src[i]?a[2*i]:copy_bytes(src[i],sizes[i]);}
+    invoke("HUD_TxferPredictionData",a,6);
+    for(unsigned i=0;i<3;i++){memcpy(dst[i],G_MEM+a[2*i],sizes[i]);bhl_heap_free(a[2*i]);if(a[2*i+1]!=a[2*i])bhl_heap_free(a[2*i+1]);}
+}
+EXPORT void HUD_PostRunCmd(local_state_t *from,local_state_t *to,usercmd_t *cmd,int run,double time,unsigned seed)
+{
+    uint32_t f=copy_bytes(from,sizeof *from),t=from==to?f:copy_bytes(to,sizeof *to),p=copy_bytes(cmd,sizeof *cmd),a[]={f,t,p,run,0,0,seed};memcpy(a+4,&time,8);invoke("HUD_PostRunCmd",a,7);
+    memcpy(from,G_MEM+f,sizeof *from);memcpy(to,G_MEM+t,sizeof *to);memcpy(cmd,G_MEM+p,sizeof *cmd);bhl_heap_free(f);if(f!=t)bhl_heap_free(t);bhl_heap_free(p);
+}
 EXPORT int HUD_Redraw(float time,int intermission){uint32_t args[2];memcpy(args,&time,4);args[1]=intermission;return invoke("HUD_Redraw",args,2);}
 EXPORT void HUD_Frame(double time){uint32_t args[2];memcpy(args,&time,8);invoke("HUD_Frame",args,2);}
 EXPORT void *KB_Find(const char *name)

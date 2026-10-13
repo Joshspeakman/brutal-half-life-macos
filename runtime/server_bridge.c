@@ -10,6 +10,7 @@
 struct hull_s;
 #include "pm_defs.h"
 #include "entity_state.h"
+#include "bspfile.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
@@ -97,6 +98,7 @@ static void push_entities(void)
 
 static uint32_t encoder_functions[3];
 static struct delta_s *active_delta;
+static uint32_t visibility_buffers[2];
 typedef struct ModelCopy { const void *host; uint32_t guest; struct ModelCopy *next; } ModelCopy;
 static ModelCopy *model_copies;
 static uint32_t model_copy(void *host)
@@ -137,6 +139,20 @@ static uint32_t copy_string(const char *s)
     if(!s)return 0;size_t n=strlen(s)+1;uint32_t p=bhl_heap_alloc((uint32_t)n,0);
     if(!p)abort();memcpy(G_MEM+p,s,n);return p;
 }
+typedef struct InfoBuffer {char *host;uint32_t guest;unsigned capacity;struct InfoBuffer *next;} InfoBuffer;
+static InfoBuffer *info_buffers;
+static uint32_t info_copy(char *host,unsigned capacity)
+{
+    if(!host)return 0;InfoBuffer *p=info_buffers;while(p&&p->host!=host)p=p->next;
+    if(!p){p=calloc(1,sizeof *p);p->host=host;p->capacity=capacity;p->guest=bhl_heap_alloc(capacity,1);p->next=info_buffers;info_buffers=p;}
+    size_t n=strnlen(host,p->capacity);if(n==p->capacity)abort();memcpy(G_MEM+p->guest,host,n+1);return p->guest;
+}
+static char *info_host(uint32_t address)
+{for(InfoBuffer *p=info_buffers;p;p=p->next)if(p->guest==address)return p->host;return gs(address);}
+static void push_info(void)
+{for(InfoBuffer *p=info_buffers;p;p=p->next){size_t n=strnlen(gs(p->guest),p->capacity);if(n==p->capacity)abort();memcpy(p->host,gs(p->guest),n+1);}}
+static void pull_info(void)
+{for(InfoBuffer *p=info_buffers;p;p=p->next)info_copy(p->host,p->capacity);}
 #include "guest_format.inc"
 static void sync_cvar(CvarBridge *v)
 {
@@ -172,9 +188,9 @@ static void sync_basic_globals(void)
 }
 static uint32_t server_call(unsigned slot,const uint32_t *args,unsigned n)
 {
-    sync_basic_globals();
+    sync_basic_globals();pull_info();
     uint32_t result=bhl_invoke(rt_r32(G_MEM,guest_api+4*slot),args,n,0);
-    push_entities();return result;
+    push_entities();push_info();return result;
 }
 #include "server_scalar_callbacks.h"
 static uint32_t command_functions[32];
@@ -193,8 +209,17 @@ static void (*commands[])(void)={command_0,command_1,command_2,command_3,command
 static void engine_dispatch(Ctx *c,unsigned slot)
 {
     if(getenv("BHL_BRIDGE_TRACE"))fprintf(stderr,"engine %s\n",engine_names[slot]);
-    push_entities();
+    push_entities();push_info();
     switch(slot){
+    case BHL_ENG_pfnSetFatPVS:case BHL_ENG_pfnSetFatPAS:{
+        unsigned i=slot==BHL_ENG_pfnSetFatPAS;byte *mask=i?engine.pfnSetFatPAS((float*)gs(A(0))):engine.pfnSetFatPVS((float*)gs(A(0)));if(!mask)RET(0);
+        const unsigned bytes=(MAX_MAP_LEAFS+7)/8; /* Pinned engine owns static arrays of exactly this size. */
+        if(!visibility_buffers[i])visibility_buffers[i]=bhl_heap_alloc(bytes,1);memcpy(G_MEM+visibility_buffers[i],mask,bytes);RET(visibility_buffers[i]);
+    }
+    case BHL_ENG_pfnGetInfoKeyBuffer:{edict_t *e=host_edict(A(0));char *p=engine.pfnGetInfoKeyBuffer(e);unsigned cap=!e?32768:e==edict_base?512:256;if(e&&e!=edict_base&&e-edict_base>host_globals->maxClients)RET(copy_string(p));RET(info_copy(p,cap));}
+    case BHL_ENG_pfnSetKeyValue:engine.pfnSetKeyValue(info_host(A(0)),gs(A(1)),gs(A(2)));pull_info();RET(0);
+    case BHL_ENG_pfnSetClientKeyValue:engine.pfnSetClientKeyValue(A(0),info_host(A(1)),gs(A(2)),gs(A(3)));pull_info();RET(0);
+    case BHL_ENG_pfnInfo_RemoveKey:engine.pfnInfo_RemoveKey(info_host(A(0)),gs(A(1)));pull_info();RET(0);
     case BHL_ENG_pfnAlertMessage:{char text[8192];format_guest(text,gs(A(1)),c->esp+12);engine.pfnAlertMessage((ALERT_TYPE)A(0),"%s",text);RET(0);}
     case BHL_ENG_pfnClientCommand:{char text[8192];format_guest(text,gs(A(1)),c->esp+12);engine.pfnClientCommand(host_edict(A(0)),"%s",text);RET(0);}
     case BHL_ENG_pfnClientPrintf:engine.pfnClientPrintf(host_edict(A(0)),(PRINT_TYPE)A(1),gs(A(2)));RET(0);
@@ -332,6 +357,31 @@ static void key_value(edict_t *entity,KeyValueData *key)
     key->fHandled=rt_r32(G_MEM,data+12);bhl_heap_free(a);bhl_heap_free(b);bhl_heap_free(d);bhl_heap_free(data);
 }
 static int spawn_entity(edict_t *entity){uint32_t arg=guest_edict(entity);return server_call(BHL_DLL_pfnSpawn,&arg,1);}
+static void client_userinfo(edict_t *entity,char *buffer)
+{uint32_t args[]={guest_edict(entity),info_copy(buffer,256)};server_call(BHL_DLL_pfnClientUserInfoChanged,args,2);}
+static qboolean client_connect(edict_t *entity,const char *name,const char *address,char reason[128])
+{
+    uint32_t n=copy_string(name),a=copy_string(address),r=bhl_heap_alloc(128,1),args[]={guest_edict(entity),n,a,r};
+    memcpy(G_MEM+r,reason,128);int result=server_call(BHL_DLL_pfnClientConnect,args,4);memcpy(reason,G_MEM+r,128);bhl_heap_free(n);bhl_heap_free(a);bhl_heap_free(r);return result;
+}
+static void update_client_data(const edict_t *entity,int weapons,clientdata_t *data)
+{uint32_t p=bhl_heap_alloc(sizeof *data,0),args[]={guest_edict(entity),weapons,p};memcpy(G_MEM+p,data,sizeof *data);server_call(BHL_DLL_pfnUpdateClientData,args,3);memcpy(data,G_MEM+p,sizeof *data);bhl_heap_free(p);}
+static int weapon_data(edict_t *entity,weapon_data_t *data)
+{uint32_t bytes=64*sizeof *data,p=bhl_heap_alloc(bytes,0),args[]={guest_edict(entity),p};memcpy(G_MEM+p,data,bytes);int r=server_call(BHL_DLL_pfnGetWeaponData,args,2);memcpy(data,G_MEM+p,bytes);bhl_heap_free(p);return r;}
+static void cmd_start(const edict_t *entity,const usercmd_t *cmd,unsigned seed)
+{uint32_t p=bhl_heap_alloc(sizeof *cmd,0),args[]={guest_edict(entity),p,seed};memcpy(G_MEM+p,cmd,sizeof *cmd);server_call(BHL_DLL_pfnCmdStart,args,3);bhl_heap_free(p);}
+static void setup_visibility(edict_t *view,edict_t *client,byte **pvs,byte **pas)
+{
+    uint32_t p=bhl_heap_alloc(8,1),args[]={guest_edict(view),guest_edict(client),p,p+4};server_call(BHL_DLL_pfnSetupVisibility,args,4);
+    uint32_t v=rt_r32(G_MEM,p),a=rt_r32(G_MEM,p+4);*pvs=v?G_MEM+v:NULL;*pas=a?G_MEM+a:NULL;bhl_heap_free(p);
+}
+static int add_full_pack(entity_state_t *state,int index,edict_t *entity,edict_t *host,int flags,int player,byte *set)
+{
+    uint32_t mask=0;
+    if(set){uintptr_t address=(uintptr_t)set-(uintptr_t)G_MEM;if(address>UINT32_MAX){fprintf(stderr,"BHL native bridge: unrecognized visibility buffer\n");abort();}mask=address;}
+    uint32_t p=bhl_heap_alloc(sizeof *state,0),args[]={p,index,guest_edict(entity),guest_edict(host),flags,player,mask};memcpy(G_MEM+p,state,sizeof *state);
+    int result=server_call(BHL_DLL_pfnAddToFullPack,args,7);memcpy(state,G_MEM+p,sizeof *state);bhl_heap_free(p);return result;
+}
 static void server_deactivate(void){server_call(BHL_DLL_pfnServerDeactivate,NULL,0);}
 static unsigned frame_count;
 static void server_activate(edict_t *list,int count,int clients)
@@ -397,6 +447,9 @@ __attribute__((visibility("default"))) int GetEntityAPI(DLL_FUNCTIONS *out,int v
     out->pfnRegisterEncoders=register_encoders;out->pfnKeyValue=key_value;out->pfnSpawn=spawn_entity;out->pfnServerDeactivate=server_deactivate;
     out->pfnServerActivate=server_activate;out->pfnStartFrame=start_frame;
     out->pfnCreateBaseline=create_baseline;
+    out->pfnClientUserInfoChanged=client_userinfo;out->pfnClientConnect=client_connect;
+    out->pfnUpdateClientData=update_client_data;out->pfnGetWeaponData=weapon_data;out->pfnCmdStart=cmd_start;
+    out->pfnSetupVisibility=setup_visibility;out->pfnAddToFullPack=add_full_pack;
     return 1;
 }
 __attribute__((visibility("default"))) int GetEntityAPI2(DLL_FUNCTIONS *out,int *version)

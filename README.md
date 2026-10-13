@@ -2,8 +2,8 @@
 
 Local development of an Apple Silicon port using the original v3 modules.
 **This is not a playable app yet.** The server loads the intro map and runs
-frames. The client reaches HUD initialization, where FMOD currently stops
-at a missing Windows mixer adapter.
+frames. The client initializes the original HUD, VGUI and FMOD, then begins
+joining the local server. Model conversion still blocks a player session.
 
 Original x86 instructions are translated to C and compiled to ARM64. The
 runtime uses a 32-bit guest address space and explicit adapters to native
@@ -46,7 +46,9 @@ A build does not install or publish an application.
 | Server integration | GameInit, movement initialization and three delta encoders run through native callbacks |
 | Headless map | `c0a0` activates and completes at least ten server frames in a bounded session |
 | Client integration | Initialize, weapon-event registration and movement initialization pass in the full engine with a null renderer |
-| Complete conversion | Pending: audio output, VGUI drawing, rendering, player movement, save/load and campaign QA |
+| Audio | Original FMOD initializes, runs native worker threads and shuts down through a native PCM adapter; sample mixing tests pass |
+| VGUI | Original App, Label and Surface code produces text textures through CoreText, paints through the engine API and passes surface restart checks |
+| Complete conversion | Pending: audible/visual comparison, model and rendering integration, player movement, save/load and campaign QA |
 
 Startup comparisons share the native OS-service model. They validate the
 translation, **not Windows API equivalence**. Null rendering and dummy audio
@@ -59,7 +61,7 @@ Reproduce the current client failure after building:
 .venv/bin/python tests/test_client_engine.py --trace
 ```
 
-This acceptance test currently fails at FMOD's mixer call. Its report is
+This acceptance test currently fails at client model/BSP conversion. Its report is
 `work/reports/client-engine.json`. Faults must be resolved before claiming
 client integration is complete.
 

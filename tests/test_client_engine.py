@@ -27,6 +27,7 @@ def main():
             code=None;timeout=True
     text=re.sub(r'\x1b\[[0-9;]*m','',log.read_text(errors='replace'))
     stages={key:message in text for key,message in {
+        'vgui_initialize':'BHL v3 VGUI App and native surface initialized',
         'client_initialize':'BHL v3 client Initialize returned 1',
         'client_movement_initialize':'BHL v3 client movement initialization completed',
         'hud_initialize':'BHL v3 HUD_Init completed',

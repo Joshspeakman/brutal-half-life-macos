@@ -54,20 +54,28 @@ uint32_t bhl_export(const char *module,const char *name)
         for(unsigned i=0;i<bhl_modules[k].export_count;i++)if(!strcmp(name,bhl_modules[k].exports[i].name))return bhl_modules[k].exports[i].address;
     return 0;
 }
-uint32_t bhl_invoke(uint32_t function,const uint32_t *args,unsigned count,int stdcall)
+static uint32_t invoke_context(uint32_t function,uint32_t object,const uint32_t *args,unsigned count,int stdcall,int thiscall)
 {
     if(!function||count>32)fail("invalid guest call");
     Ctx *parent=active_context,*source=parent?parent:&root_context,child=*source;
     uint32_t sp=source->esp-16-4*(count+1);
-    if(sp<BHL_STACK_BASE+0x1000)fail("guest stack exhausted");
-    child.esp=sp;rt_w32(G_MEM,sp,0x00100000);
+    if(sp<rt_r32(G_MEM,source->fs_base+8)+0x1000)fail("guest stack exhausted");
+    child.esp=sp;if(thiscall)child.ecx=object;rt_w32(G_MEM,sp,0x00100000);
     for(unsigned i=0;i<count;i++)rt_w32(G_MEM,sp+4+4*i,args[i]);
     active_context=&child;uint32_t pc=0;const char *why=NULL;
     int result=rt_test_run(&child,function,&pc,&why);active_context=parent;
     if(result){fprintf(stderr,"BHL guest call %08x failed at %08x: %s\n",function,pc,why);abort();}
-    if(child.esp!=sp+4+(stdcall?4*count:0))fail("guest calling convention/stack mismatch");
+    /* Windows discards the entire stack when a thread entry returns. Legacy
+       FMOD passes cdecl entries to CreateThread; both return conventions are
+       therefore accepted only for that terminal call (mode 2). */
+    int stack_ok=stdcall==2?(child.esp==sp+4||child.esp==sp+4+4*count):child.esp==sp+4+(stdcall?4*count:0);
+    if(!stack_ok){fprintf(stderr,"BHL guest call %08x returned stack %08x from %08x\n",function,child.esp,sp);fail("guest calling convention/stack mismatch");}
     return child.eax;
 }
+uint32_t bhl_invoke(uint32_t function,const uint32_t *args,unsigned count,int stdcall)
+{ return invoke_context(function,0,args,count,stdcall,0); }
+uint32_t bhl_thiscall(uint32_t function,uint32_t object,const uint32_t *args,unsigned count)
+{ if(!object)fail("null thiscall object");return invoke_context(function,object,args,count,1,1); }
 void bhl_attach(const char *module)
 {
     bhl_initialize();
@@ -79,3 +87,12 @@ void bhl_attach(const char *module)
     }
     fail("module missing from native build");
 }
+static void thread_notifications(unsigned reason)
+{
+    extern int bhl_thread_notifications_enabled(uint32_t);
+    for(unsigned i=0;i<bhl_module_count;i++)if(attached[i]&&bhl_thread_notifications_enabled(bhl_modules[i].base)){
+        uint32_t args[]={bhl_modules[i].base,reason,0};bhl_invoke(bhl_modules[i].entry,args,3,1);
+    }
+}
+void bhl_enter_guest_thread(Ctx *context){active_context=context;thread_notifications(2);}
+void bhl_leave_guest_thread(void){extern void bhl_fls_thread_exit(void);thread_notifications(3);bhl_fls_thread_exit();active_context=NULL;}
