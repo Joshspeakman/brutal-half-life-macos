@@ -22,6 +22,7 @@ def main():
     ap.add_argument('--maps',nargs='+')
     ap.add_argument('--seconds',type=int,default=90)
     ap.add_argument('--resume',action='store_true')
+    ap.add_argument('--renderer',choices=['gl','metal'],default='metal')
     args=ap.parse_args()
     session=args.session.resolve()
     if not session.is_relative_to(ROOT/'work'):ap.error('Tests require a session inside work/')
@@ -30,7 +31,8 @@ def main():
     selected=args.maps or sorted(available)
     if set(selected)-set(available) or any(not re.fullmatch('[A-Za-z0-9_-]+',m) for m in selected):ap.error('Unknown map')
     binaries=['work/session/bhl/dlls/libbhl.dylib','work/session/bhl/dlls/hl_arm64.dylib','work/session/bhl/cl_dlls/client_arm64.dylib',
-              'work/session/libxash.dylib','work/session/libref_gl.dylib']
+              'work/session/libxash.dylib',f'work/session/libref_{args.renderer}.dylib']
+    if args.renderer=='metal':binaries += ['work/session/libEGL.dylib','work/session/libGLESv2.dylib']
     hashes={p:hashlib.sha256((session/p.removeprefix('work/session/')).read_bytes()).hexdigest() for p in binaries}
     key=hashlib.sha256(json.dumps(hashes,sort_keys=True).encode()).hexdigest()[:16]
     out=ROOT/'work/reports/maps'/key;out.mkdir(parents=True,exist_ok=True)
@@ -41,7 +43,7 @@ def main():
             record=json.loads(record_file.read_text())
             if record['passed']:report['maps'][name]=record;continue
         print('Map:',name,flush=True);began=time.monotonic()
-        command=[sys.executable,str(ROOT/'tests/test_client_engine.py'),'--renderer','gl','--video-driver','cocoa',
+        command=[sys.executable,str(ROOT/'tests/test_client_engine.py'),'--renderer',args.renderer,'--video-driver','cocoa',
                  '--session',str(session),'--report-dir',str(out),'--map',name,'--capture','--quit-after-frames','35','--seconds',str(args.seconds)]
         with (out/(name+'.console.log')).open('w') as stream:
             result=subprocess.run(command,cwd=ROOT,stdout=stream,stderr=subprocess.STDOUT)

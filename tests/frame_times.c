@@ -11,6 +11,7 @@ static unsigned count;
 static uint64_t previous;
 static const char *gate,*output;
 extern void SDL_GL_SwapWindow(void *);
+extern int SDL_GL_GetSwapInterval(void);
 static uint64_t now(void)
 {struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return (uint64_t)t.tv_sec*1000000000u+t.tv_nsec;}
 __attribute__((constructor)) static void setup(void)
@@ -21,6 +22,7 @@ static void measured_swap(void *window)
        resolve the replacement again on current macOS and recurse. */
     SDL_GL_SwapWindow(window);uint64_t time=now();
     if(!gate||access(gate,F_OK)){previous=0;return;}
+    if(!previous&&!count)fprintf(stderr,"BHL_BENCH_SWAP_INTERVAL %d\n",SDL_GL_GetSwapInterval());
     if(previous&&count<sizeof intervals/sizeof *intervals)intervals[count++]=(time-previous)/1e6;
     previous=time;
 }

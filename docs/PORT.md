@@ -121,8 +121,11 @@ Interactive menus and visual font fidelity remain unverified.
 
 ## Engine boundary
 
-The native renderer is OpenGL, with the original client's studio animation
-code adapted to Xash3D. There is no project Metal renderer. Profiling the
+The app now uses Metal through ANGLE and Xash's GLES shader adapter, with the
+original client's studio animation code adapted to Xash3D. The launcher
+selects `ref_metal`; startup verifies both ANGLE's Metal renderer and its
+`EGL_ANGLE_device_metal` device. It does not silently fall back to desktop GL.
+The original OpenGL renderer remains a development comparison path. Profiling the
 campaign hub identified substantial CPU overhead in entity synchronization
 and identity searches. The adapters now compile with optimization level 2
 and cache entity/model identity lookups, preserving the existing state
@@ -168,14 +171,22 @@ particle allocation identities prevent retired free-list entries from being
 traversed and stale guest writes from reaching recycled native slots.
 
 Local engine patches add `-hidden` for tests, expose particle allocation
-identities, and honor the single-player frame cap with VSync. Session staging
+identities, honor the single-player frame cap with VSync, and implement the
+Metal/ANGLE path. Session staging
 replaces Mach-O files atomically and takes a lock shared with engine tests, so
 a running test cannot have its executable overwritten. Each client run starts
 from the mod's shipped config (`cl_lw 0`); client weapon prediction with
 `cl_lw 1` remains unverified.
 
-SDL imports use native SDL, controller objects use handles, and OpenGL calls
-require a real native context. Windows global mouse-acceleration settings
+SDL imports use native SDL, controller objects use handles, and original GL
+imports require a live graphics context. The client obtains the renderer's
+procedure resolver through `HUD_GetRenderInterface`, so its fog calls share
+the world renderer's shader state under Metal. The GLES adapter supports
+linear, exponential and squared-exponential fog with eye-space distance;
+MODULATE, REPLACE, DECAL and ADD texture environments; RGB/RGBA alpha semantics;
+and modelview/projection plus two texture matrices. General texture combiners
+remain unadvertised, allowing the engine's existing multipass paths to run.
+Windows global mouse-acceleration settings
 are reported unsupported; the original client handles the failure and uses
 SDL input. macOS system mouse preferences are not changed.
 

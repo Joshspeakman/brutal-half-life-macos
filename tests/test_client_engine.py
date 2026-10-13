@@ -19,7 +19,7 @@ def main():
     ap.add_argument('--report-dir',type=Path,default=ROOT/'work/reports')
     ap.add_argument('--seconds',type=int,default=15)
     ap.add_argument('--trace',action='store_true')
-    ap.add_argument('--renderer',choices=['null','soft','gl'],default='null')
+    ap.add_argument('--renderer',choices=['null','soft','gl','metal'],default='null')
     ap.add_argument('--video-driver',choices=['dummy','cocoa'],default='dummy')
     ap.add_argument('--map',default='c0a0')
     ap.add_argument('--capture',action='store_true',help='Request an engine-only PNG after twenty frames')
@@ -46,6 +46,9 @@ def main():
     if args.trace:environment.update(BHL_TRACE='1',BHL_BRIDGE_TRACE='1')
     if args.weapons:environment['BHL_COMBAT_TRACE']='1'
     command=['./xash3d','-game','bhl','-ref',args.renderer,'-hidden','-windowed','-width','800','-height','600','-nomouse','-dev','3','-noip','-noip6','-nomaster','-nowriteconfig','-console','+sv_lan','1','+map',args.map]
+    if args.renderer=='metal':
+        environment.update(SDL_EGL_LIBRARY=str(session/'libEGL.dylib'),SDL_OPENGL_LIBRARY=str(session/'libGLESv2.dylib'),ANGLE_DEFAULT_PLATFORM='metal')
+        command.insert(1,'-metal')
     capture=session/'bhl/scrshots/native-acceptance.png'
     if args.capture or args.save_load or args.weapons or args.music or args.quit_after_frames:
         capture.unlink(missing_ok=True)
@@ -84,6 +87,10 @@ def main():
         'client_connected':'client connected at',
     }.items()}
     failures=[line for line in text.splitlines() if re.search('BHL.*(unimplemented|failed|not implemented)|Crash:|Xash Error:|BHL native loader:|Host_Error:',line)]
+    if args.renderer=='metal':
+        stages['metal_backend_verified']='BHL Metal backend verified: ANGLE' in text and 'ANGLE Metal Renderer:' in text
+        stages['metal_device_verified']='BHL Metal device verified: EGL_ANGLE_device_metal' in text
+        failures += [line for line in text.splitlines() if re.search(r'OpenGL Error:|GL2_.*compile failed',line)]
     if args.save_load:
         stages['fresh_save_written']=save_file.exists() and save_file.stat().st_size>0
         stages['map_reactivated']=text.count('BHL v3 ServerActivate completed')>=2

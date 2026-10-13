@@ -24,9 +24,11 @@ def main():
     ap.add_argument('--data',type=Path,default=ROOT/'work/app-data')
     ap.add_argument('--client',type=Path);ap.add_argument('--server',type=Path);ap.add_argument('--core',type=Path)
     ap.add_argument('--engine',type=Path)
+    ap.add_argument('--renderer',choices=['gl','metal'],default='metal')
     ap.add_argument('--map',default='start');ap.add_argument('--frames',type=int,default=1200)
     ap.add_argument('--width',type=int,default=1280);ap.add_argument('--height',type=int,default=720)
     ap.add_argument('--fps-cap',type=int,default=1000);ap.add_argument('--vsync',action='store_true')
+    ap.add_argument('--fullscreen',action='store_true',help='Show a native fullscreen window for an interactive-display measurement')
     ap.add_argument('--attack',action='store_true');ap.add_argument('--bridge-profile',action='store_true')
     ap.add_argument('--capture',action='store_true',help='Capture the scene after timing stops')
     ap.add_argument('--name',required=True);ap.add_argument('--seconds',type=int,default=180)
@@ -56,23 +58,30 @@ def main():
     if args.capture:capture.unlink(missing_ok=True)
     screenshot=wait*3+'snapshot scrshots/native-benchmark.png\n'+wait*3 if args.capture else ''
     script.write_text('scr_conspeed 100000\ndeveloper 0\n'+wait*120+setup+wait*30+
-                      'echo BHL_BENCH_BEGIN\n'+wait*args.frames+'echo BHL_BENCH_END\n-attack\n'+screenshot+'quit\n')
+                      'vid_info\necho BHL_BENCH_BEGIN\n'+wait*args.frames+'echo BHL_BENCH_END\n-attack\n'+screenshot+'quit\n')
     env={k:v for k,v in os.environ.items() if not k.startswith(('BHL_','SDL_','DYLD_','XASH3D_'))}
     overrides=[p.resolve().parent for p in (args.core,args.client,args.server,args.engine) if p]
     env.update(BHL_IMAGE_DIR=str(resources/'Images'),XASH3D_BASEDIR=str(data),XASH3D_EXTRAS_PAK1=str(resources/'extras.pk3'),
                DYLD_LIBRARY_PATH=':'.join(map(str,dict.fromkeys(overrides+[runtime]))),DYLD_PRINT_LIBRARIES='1',
                DYLD_INSERT_LIBRARIES=str(probe),SDL_AUDIODRIVER='dummy',BHL_BENCH_GATE=str(gate),BHL_BENCH_TIMES=str(timings))
+    env['SDL_VIDEO_MAC_FULLSCREEN_SPACES']='1'
     if args.bridge_profile:env['BHL_BRIDGE_PROFILE']='1'
-    command=[str(runtime/'xash3d'),'-game','bhl','-ref','gl','-dll',str((args.server or runtime/'hl_arm64.dylib').resolve()),
+    if args.renderer=='metal':
+        env.update(SDL_EGL_LIBRARY=str(runtime/'libEGL.dylib'),SDL_OPENGL_LIBRARY=str(runtime/'libGLESv2.dylib'),ANGLE_DEFAULT_PLATFORM='metal')
+    command=[str(args.app.resolve()/'Contents/MacOS/BrutalHalfLife'),'--run-engine','-game','bhl','-ref',args.renderer,'-dll',str((args.server or runtime/'hl_arm64.dylib').resolve()),
              '-clientlib',str((args.client or runtime/'client_arm64.dylib').resolve()),'-menulib',str(runtime/'libmenu.dylib'),
-             '-hidden','-nomouse','-windowed','-width',str(args.width),'-height',str(args.height),'-noip','-noip6','-nomaster',
+             *(['-borderless'] if args.fullscreen else ['-hidden','-windowed']),'-nomouse','-width',str(args.width),'-height',str(args.height),'-noip','-noip6','-nomaster',
              '-nowriteconfig','-dev','3','+sv_lan','1','+cl_lw','0','+fps_max',str(args.fps_cap),'+gl_vsync',str(int(args.vsync)),
              '+host_framerate','0.008333333','+map',args.map,'+exec',script.name]
+    if args.renderer=='metal':command.insert(2,'-metal')
     began=time.monotonic();marks={};timeout=False;pending=b''
-    report=dict(map=args.map,frames=args.frames,logical_size=[args.width,args.height],fixed_simulation_step=1/120,
-                fps_cap=args.fps_cap,vsync=args.vsync,audio='dummy',attack=args.attack,profiling=args.bridge_profile,
-                libraries={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in
-                           [args.core or runtime/'libbhl.dylib',args.client or runtime/'client_arm64.dylib',args.server or runtime/'hl_arm64.dylib',args.engine or runtime/'libxash.dylib']})
+    expected=[args.core or runtime/'libbhl.dylib',args.client or runtime/'client_arm64.dylib',
+              args.server or runtime/'hl_arm64.dylib',args.engine or runtime/'libxash.dylib',
+              runtime/f'libref_{args.renderer}.dylib']
+    if args.renderer=='metal':expected += [runtime/'libEGL.dylib',runtime/'libGLESv2.dylib']
+    report=dict(map=args.map,renderer=args.renderer,frames=args.frames,logical_size=[args.width,args.height],fixed_simulation_step=1/120,
+                fps_cap=args.fps_cap,vsync=args.vsync,fullscreen=args.fullscreen,audio='dummy',attack=args.attack,profiling=args.bridge_profile,
+                libraries={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in expected})
     p=None
     try:
         p=subprocess.Popen(command,cwd=data,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,start_new_session=True)
@@ -100,18 +109,23 @@ def main():
     values=json.loads(timings.read_text()) if timings.exists() else []
     log=re.sub(r'\x1b\[[0-9;]*m','',out.with_suffix('.log').read_text(errors='replace'))
     loaded={Path(p).name:Path(p).resolve() for p in re.findall(r'dyld\[\d+\]: <[^>]+> (.+)',log)}
-    size=re.search(r'Window size: (\d+)x(\d+) \(real (\d+)x(\d+)\)',log)
-    report['drawable_size']=[int(size[3]),int(size[4])] if size else None
+    sizes=re.findall(r'Window size: (\d+)x(\d+) \(real (\d+)x(\d+)\)',log)
+    report['drawable_size']=[int(sizes[-1][2]),int(sizes[-1][3])] if sizes else None
     if args.capture:
         if capture.exists():
             target=out.with_suffix('.png');target.write_bytes(capture.read_bytes());report['capture']=str(target.relative_to(ROOT))
         else:report['capture']=None
-    expected=[args.core or runtime/'libbhl.dylib',args.client or runtime/'client_arm64.dylib',args.server or runtime/'hl_arm64.dylib',args.engine or runtime/'libxash.dylib']
     report['library_paths_verified']=all(loaded.get(p.name)==p.resolve() for p in expected)
     report['runtime_failures']=[line for line in log.splitlines() if re.search(r'BHL.*(unimplemented|not implemented)|Crash:|Xash Error:|BHL native loader:|Host_Error:',line)]
     report['god_enabled']='godmode ON' in log
+    interval=re.search(r'BHL_BENCH_SWAP_INTERVAL (-?\d+)',log)
+    report['swap_interval']=int(interval[1]) if interval else None
     report['presented_intervals']=len(values)
     report['passed']=report['returncode']==0 and not timeout and len(marks)==2 and abs(len(values)-args.frames)<=4 and report['library_paths_verified'] and not report['runtime_failures'] and report['god_enabled']
+    report['passed']=report['passed'] and report['swap_interval']==int(args.vsync)
+    if args.renderer=='metal':
+        report['metal_verified']='BHL Metal backend verified: ANGLE' in log and 'BHL Metal device verified: EGL_ANGLE_device_metal' in log
+        report['passed']=report['passed'] and report['metal_verified']
     if args.capture:report['passed']=report['passed'] and bool(report['capture'])
     if len(marks)==2:report['marker_fps']=args.frames/(marks['BHL_BENCH_END']-marks['BHL_BENCH_BEGIN'])
     if values:

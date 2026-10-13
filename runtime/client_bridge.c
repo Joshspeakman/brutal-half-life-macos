@@ -24,6 +24,7 @@ struct hull_s;
 #include "studio_event.h"
 #include "com_model.h"
 #include "r_studioint.h"
+#include "render_api.h"
 #include <stdio.h>
 #include <stdlib.h>
 struct mstudioevent_s;
@@ -322,7 +323,15 @@ EXPORT int Initialize(cl_enginefunc_t *functions,int version)
 }
 EXPORT void HUD_Init(void){invoke("HUD_Init",NULL,0);fprintf(stderr,"BHL v3 HUD_Init completed\n");}
 EXPORT int HUD_VidInit(void){model_reset();return invoke("HUD_VidInit",NULL,0);}
-EXPORT void HUD_Shutdown(void){invoke("HUD_Shutdown",NULL,0);}
+extern void bhl_set_graphics_proc(void *(*resolve)(const char *));
+EXPORT int HUD_GetRenderInterface(int version,render_api_t *api,render_interface_t *callbacks)
+{
+    if(version!=CL_RENDER_INTERFACE_VERSION||!api||!callbacks)return 0;
+    bhl_set_graphics_proc(api->GL_GetProcAddress);
+    memset(callbacks,0,sizeof *callbacks);
+    return 1;
+}
+EXPORT void HUD_Shutdown(void){invoke("HUD_Shutdown",NULL,0);bhl_set_graphics_proc(NULL);}
 EXPORT void HUD_Reset(void){invoke("HUD_Reset",NULL,0);}
 EXPORT void IN_ActivateMouse(void){invoke("IN_ActivateMouse",NULL,0);}
 EXPORT void IN_DeactivateMouse(void){invoke("IN_DeactivateMouse",NULL,0);}

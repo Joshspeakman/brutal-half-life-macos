@@ -1,7 +1,7 @@
 """Exercise the actual launcher, bundled libraries and separate game data.
 
-All test saves have reserved names. Rendering is hidden and audio uses the
-dummy device. This is not a claim of interactive gameplay equivalence.
+All test saves have reserved names. Rendering is hidden unless --visible is
+requested; audio uses the dummy device. This is not gameplay equivalence.
 """
 import argparse
 import hashlib
@@ -19,9 +19,12 @@ from native_harness import ROOT
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--app', type=Path, default=ROOT/'work/package/Brutal Half-Life.app')
-    ap.add_argument('--stages', nargs='+', choices=['menu', 'campaign', 'save', 'reload', 'transition', 'combat', 'movement', 'cycles'],
-                    default=['menu', 'campaign', 'save', 'reload', 'transition', 'combat', 'movement', 'cycles'])
+    ap.add_argument('--report-dir', type=Path, default=ROOT/'work/reports/packaged')
+    ap.add_argument('--stages', nargs='+', choices=['menu', 'campaign', 'save', 'reload', 'transition', 'combat', 'movement', 'cycles', 'display'],
+                    default=['menu', 'campaign', 'save', 'reload', 'transition', 'combat', 'movement', 'cycles', 'display'])
     ap.add_argument('--seconds', type=int, default=180)
+    ap.add_argument('--visible', action='store_true', help='Show test windows to verify native fullscreen and OS Game Mode')
+    ap.add_argument('--fullscreen', action='store_true', help='Exercise the launcher Fullscreen option')
     args = ap.parse_args()
     app = args.app.resolve()
     with (app/'Contents/Info.plist').open('rb') as stream:
@@ -29,7 +32,9 @@ def main():
     if not data.is_relative_to(ROOT/'work'):
         ap.error('Acceptance tests require isolated data inside ignored work/')
     executable = app/'Contents/MacOS/BrutalHalfLife'
-    out = ROOT/'work/reports/packaged'; out.mkdir(exist_ok=True)
+    out = args.report_dir.resolve()
+    if not out.is_relative_to(ROOT/'work'):ap.error('Reports must remain inside ignored work/')
+    out.mkdir(parents=True,exist_ok=True)
     image_probe = ROOT/'work/native/image-coverage'
     if 'menu' in args.stages:
         subprocess.run(['swiftc', str(ROOT/'tests/image_coverage.swift'), '-o', str(image_probe)], check=True)
@@ -42,6 +47,11 @@ def main():
         'transition': 'map c0a0\n'+wait*30+'changelevel c0a0a c0a0toa\n'+wait*35+'save native-transition\n'+wait*5+'load native-transition\n'+wait*30+'echo BHL_PACKAGE_TRANSITION\nquit\n',
         'combat': 'map c2a2d\n'+wait*30+'sv_cheats 1\ngod\n'+wait*200+'save native-tank\n'+wait*5+'load native-tank\n'+wait*40+'echo BHL_PACKAGE_COMBAT\nquit\n',
         'movement': 'map _zoo\n'+wait*35+'viewpos\n+forward\n'+wait*30+'-forward\n'+wait*3+'viewpos\n+jump\n'+wait*5+'-jump\nviewpos\n'+wait*40+'+duck\n'+wait*10+'viewpos\n-duck\n'+wait*10+'viewpos\n+use\n'+wait*3+'-use\necho BHL_PACKAGE_MOVEMENT\nquit\n',
+        'display': 'map c1a0\nscr_conspeed 100000\n'+wait*80+
+                   'width 1024\nheight 576\nfullscreen 0\n'+wait*40+'vid_info\nsnapshot scrshots/native-display-window.png\n'+wait*3+
+                   'fullscreen 1\n'+wait*60+'vid_info\nsnapshot scrshots/native-display-full.png\n'+wait*3+
+                   'fullscreen 0\nwidth 1280\nheight 720\n'+wait*50+'vid_info\nsnapshot scrshots/native-display-return.png\n'+wait*3+
+                   'echo BHL_PACKAGE_DISPLAY\nquit\n',
     }
     cycle_maps=['_zoo','start','c1a0','c1a1','c1a4','c2a2d','c2a3','c2a4','c3a1','c4a1','c4a3','c5a1','_zoo','start']
     scripts['cycles']=''.join('map '+name+'\n'+wait*35+'echo BHL_CYCLE '+name+'\n' for name in cycle_maps)+'save native-cycles\n'+wait*5+'load native-cycles\n'+wait*35+'echo BHL_PACKAGE_CYCLES\nquit\n'
@@ -58,9 +68,15 @@ def main():
         if stage == 'campaign': capture.unlink(missing_ok=True)
         menu_capture = data/'bhl/scrshots/native-package-menu.png'
         if stage == 'menu': menu_capture.unlink(missing_ok=True)
+        display_captures=[data/'bhl/scrshots'/('native-display-'+name+'.png') for name in ('window','full','return')]
+        if stage=='display':
+            for path in display_captures:path.unlink(missing_ok=True)
         log = out/(stage+'.launcher.log'); began = time.monotonic(); timeout = False
         with log.open('w') as stream:
-            p = subprocess.Popen([str(executable), '--engine-test', name], stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
+            command = [str(executable), '--engine-test', name]
+            if args.visible: command.append('--engine-test-visible')
+            if args.fullscreen: command.append('--engine-test-fullscreen')
+            p = subprocess.Popen(command, stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
             try:
                 code = p.wait(timeout=args.seconds)
             except subprocess.TimeoutExpired:
@@ -70,6 +86,18 @@ def main():
         failures = [line for line in text.splitlines() if re.search(r'BHL.*(unimplemented|failed|not implemented)|Crash:|Xash Error:|BHL native loader:|Host_Error:', line)]
         checks = dict(normal_exit=code == 0 and not timeout, marker='BHL_PACKAGE_'+stage.upper() in text,
                       no_runtime_failure=not failures, config_preserved=hashlib.sha256(config.read_bytes()).hexdigest() == before)
+        checks['metal_backend_verified']='BHL Metal backend verified: ANGLE' in text and 'ANGLE Metal Renderer:' in text
+        checks['metal_device_verified']='BHL Metal device verified: EGL_ANGLE_device_metal' in text
+        checks['game_process_identity']='BHL game app identity: io.github.brutal-half-life-macos' in text
+        checks['no_graphics_errors']=not re.search(r'OpenGL Error:|GL2_.*compile failed',text)
+        if args.visible and args.fullscreen:
+            checks['launcher_native_fullscreen']='BHL macOS native fullscreen entered' in text
+        if stage=='display':
+            checks['display_captures']=all(path.exists() for path in display_captures)
+            checks['borderless_fullscreen']='Window mode: fullscreen desktop' in text
+            checks['windowed_resize']='Window size: 1024x576' in text
+            checks['returned_to_window']='Window size: 1280x720' in text and text.count('Window mode: windowed')>=2
+            if args.visible: checks['native_fullscreen_entered']='BHL macOS native fullscreen entered' in text
         loaded = re.findall(r'^dyld\[\d+\]: <[^>]+> (.+)$', text, re.M)
         runtime = app/'Contents/Resources/Runtime'
         names = set(report['app_build']['runtime'])

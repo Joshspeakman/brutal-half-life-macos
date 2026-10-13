@@ -38,12 +38,15 @@ def bundle_runtime(target):
         'xash3d': 'game_launch/xash3d', 'libxash.dylib': 'engine/libxash.dylib',
         'libmenu.dylib': '3rdparty/mainui/libmenu.dylib',
         'libref_gl.dylib': 'ref/gl/libref_gl.dylib',
+        'libref_metal.dylib': 'ref/gl/libref_metal.dylib',
         'filesystem_stdio.dylib': 'filesystem/filesystem_stdio.dylib',
     }.items()}
     inputs.update({
         'hl_arm64.dylib': ROOT/'work/bridge/hl_arm64.dylib',
         'client_arm64.dylib': ROOT/'work/bridge/client_arm64.dylib',
         'libbhl.dylib': ROOT/'work/native/libbhl.dylib',
+        'libEGL.dylib': ROOT/'work/angle/libEGL.dylib',
+        'libGLESv2.dylib': ROOT/'work/angle/libGLESv2.dylib',
     })
     # sdl2-compat loads SDL3 dynamically, so it is absent from otool -L.
     sdl = Path(run('pkg-config', '--variable=libdir', 'sdl2').strip())/'libSDL2.dylib'
@@ -195,6 +198,8 @@ def main():
                     CFBundleName='Brutal Half-Life', CFBundleDisplayName='Brutal Half-Life',
                     CFBundlePackageType='APPL', CFBundleShortVersionString='0.1', CFBundleVersion='1',
                     LSMinimumSystemVersion='14.0', NSHighResolutionCapable=True,
+                    LSApplicationCategoryType='public.app-category.games',
+                    GCSupportsGameMode=True, LSSupportsGameMode=True,
                     NSPrincipalClass='NSApplication', CFBundleIconFile='BrutalHalfLife', BHLDataDirectory=str(data))
         with (staging/'Contents/Info.plist').open('wb') as stream:
             plistlib.dump(info, stream)
@@ -203,10 +208,13 @@ def main():
         run('iconutil', '-c', 'icns', iconset, '-o', resources/'BrutalHalfLife.icns')
         shutil.rmtree(iconset)
         shutil.copy2(ROOT/'NOTICE.txt', resources/'NOTICE.txt')
+        notices = resources/'Licenses'; notices.mkdir()
+        for name in ('LICENSE', 'LICENSES.chromium.html', 'manifest.json'):
+            shutil.copy2(ROOT/'work/angle'/name, notices/('ANGLE-'+name))
         (resources/'Build.json').write_text(json.dumps(dict(
             revision=run('git', '-C', ROOT, 'rev-parse', 'HEAD').strip(),
             source_dirty=bool(run('git', '-C', ROOT, 'status', '--porcelain').strip()),
-            architecture='arm64', runtime=hashes,
+            architecture='arm64', renderer='Metal (ANGLE)', runtime=hashes,
             images={p.name: digest(p) for p in images.iterdir()}), indent=2)+'\n')
         run('codesign', '--force', '--sign', '-', staging)
         run('codesign', '--verify', '--deep', '--strict', staging)

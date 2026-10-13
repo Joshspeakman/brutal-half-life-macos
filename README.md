@@ -5,7 +5,7 @@ Local development of an Apple Silicon port using the original v3 modules.
 launches the original client and server, renders the campaign hub and showcase,
 plays decoded audio through CoreAudio, and supports native saves. All 134
 shipped maps pass initial activation/simulation checks. Full campaign behavior,
-physical mouse/fullscreen use, audible/visual comparison and performance need
+physical mouse use, audible/visual comparison and performance need
 further validation before this can be considered finished.
 
 Original x86 instructions are translated to C and compiled to ARM64. The
@@ -13,8 +13,12 @@ runtime uses a 32-bit guest address space and explicit adapters to native
 Xash3D. Wine and Rosetta are not used. Unicorn executes original instructions
 only for development comparisons.
 
-Graphics currently use Xash3D's OpenGL renderer. Native ARM64 execution does
-not mean a native Metal backend; no Metal renderer is implemented here.
+The app renders through **Metal using ANGLE**, with Xash's fixed-function
+shader adapter translating the engine's rendering commands to OpenGL ES 3.0.
+ANGLE submits the resulting shaders and draws to Metal. Startup verifies an
+actual Metal device and rejects an OpenGL fallback. This is a Metal backend
+through a compatibility layer, not a renderer rewritten entirely in Metal.
+The original OpenGL path remains available for development comparisons.
 
 ## Reproduce the development build
 
@@ -32,7 +36,7 @@ brew install pkg-config sdl2 upx
 
 Bootstrap creates the pinned Python environment and runs the small interface
 proof. The project builder verifies the archive, fetches pinned engine/SDK
-dependencies, unpacks FMOD, relocates and translates all four modules, builds
+dependencies and pinned ARM64 ANGLE libraries, unpacks FMOD, relocates and translates all four modules, builds
 both bridges and stages an isolated session. First-time translation takes
 longer than incremental builds.
 
@@ -62,6 +66,13 @@ guarantee. A 60 FPS limit and uncapped mode (engine ceiling: 1,000 FPS) are also
 available. The Controls button explains
 v3's bindings; detailed input/audio/video settings remain in the game menu.
 
+Fullscreen uses native macOS fullscreen Spaces so the OS can activate Game Mode.
+The game runs inside the app's executable with its own game category and Game
+Mode metadata, while the launcher continues monitoring it. Windowed play does
+not activate Game Mode. On macOS 26 or later, Command-Escape opens Game Overlay;
+if Game Mode was manually disabled there, macOS remembers that choice.
+The resolution selector sets window size; native fullscreen uses desktop resolution.
+
 The translated runtime builds at `-O2` with ThinLTO. The adapters avoid
 unnecessary world-state copies, validate cached model identities, and track
 native particle allocation lifetimes. See [performance notes](docs/PERFORMANCE.md)
@@ -78,14 +89,15 @@ for measurements, reproduction commands and the remaining CPU bottleneck.
 | Native services | Tests cover codepages, heap ownership, locks, Unicode file I/O, directory searches, time conversion and binary CRT streams |
 | Server integration | GameInit, movement initialization and three delta encoders run through native callbacks |
 | Headless map | `c0a0` activates and completes at least ten server frames in a bounded session |
-| Client integration | Original movement, studio animation, entities and temporary effects cross the native boundary; OpenGL produces a coherent showcase scene and view model |
+| Client integration | Original movement, studio animation, entities and temporary effects cross the native boundary; Metal renders the campaign, showcase and view models; 17 GPU pixel contracts pass on both renderers |
 | Audio | Original FMOD decodes WAV and game MP3 data to nonzero PCM; pause/resume, seek, volume, pan and shutdown checks pass on dummy audio and the native CoreAudio device |
 | VGUI | Original App, Label and Surface code produces text textures through CoreText, paints through the engine API and passes surface restart checks |
 | Saving | Original serializer handles fields, entities, time and landmarks; packaged tests cover fresh-process reload and the first tram landmark transition |
 | Combat smoke tests | All 36 exported weapon classes have been requested across scripted primary/secondary/reload and save/load batches; equipping variants and hit behavior need gameplay comparison |
 | Map coverage | All 134 shipped maps pass activation, 35 initial frames, capture and normal shutdown; fourteen repeated loads plus save/reload pass in one process |
 | Input | SDL queue events exercise original walking, jumping, crouching, menu return, F5 quicksave and F6 quickload; physical input remains unverified |
-| Mac packaging | Eight packaged-launcher checks pass: menu, campaign hub, save, fresh-process reload, landmark transition, mounted-weapon combat, movement and repeated level loads; bundled libraries load without Homebrew dependencies |
+| Mac packaging | Nine packaged-launcher checks cover menu, campaign hub, save, fresh-process reload, landmark transition, mounted-weapon combat, movement, repeated level loads and display changes; bundled libraries load without Homebrew dependencies |
+| Fullscreen / Game Mode | Visible checks cover launch into native fullscreen, the in-game fullscreen command and return to a resized window; macOS gamepolicyd confirms Game Mode activation |
 | Complete conversion | Pending: full campaign/script playthrough, physical input and audible/visual comparison, remaining runtime edge cases and performance |
 
 Startup comparisons share the native OS-service model. They validate the

@@ -47,7 +47,9 @@ def main():
         subprocess.run(['./waf','configure','--out=build','--dedicated','--disable-werror','--64bits','--prefix='+str(ROOT/'work/engine-dedicated')],cwd=engine,check=True)
         subprocess.run(['./waf','build','-j4'],cwd=engine,check=True)
     if args.build_client_engine:
-        subprocess.run(['./waf','configure','--out=build-client','--disable-werror','--64bits','--enable-soft','--enable-null','--sdl-use-pkgconfig','--prefix='+str(ROOT/'work/engine-client')],cwd=engine,check=True)
+        from fetch_angle import fetch
+        fetch()
+        subprocess.run(['./waf','configure','--out=build-client','--disable-werror','--64bits','--enable-soft','--enable-null','--enable-gles3compat','--sdl-use-pkgconfig','--prefix='+str(ROOT/'work/engine-client')],cwd=engine,check=True)
         subprocess.run(['./waf','build','-j4'],cwd=engine,check=True)
     print(f'Pinned dependencies ready; verified all {len(imports)} client VGUI imports')
 

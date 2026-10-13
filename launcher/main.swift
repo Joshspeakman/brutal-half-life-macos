@@ -19,7 +19,9 @@ struct Installation {
         data = path.map { URL(fileURLWithPath: $0) } ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Brutal Half-Life")
     }
     func validate() throws {
-        for url in [runtime.appendingPathComponent("xash3d"), runtime.appendingPathComponent("client_arm64.dylib"),
+        for url in [runtime.appendingPathComponent("libxash.dylib"), runtime.appendingPathComponent("client_arm64.dylib"),
+                    runtime.appendingPathComponent("libref_metal.dylib"), runtime.appendingPathComponent("libEGL.dylib"),
+                    runtime.appendingPathComponent("libGLESv2.dylib"),
                     runtime.appendingPathComponent("hl_arm64.dylib"), resources.appendingPathComponent("Images/hl.dll"),
                     data.appendingPathComponent("native-install.json"), data.appendingPathComponent("valve/halflife.wad"),
                     mod.appendingPathComponent("maps/start.bsp")] {
@@ -37,26 +39,33 @@ struct Installation {
     }
     func process(mode: Int, resolution: Int, fullscreen: Bool, difficulty: Int, frameRate: Int = 0, vsync: Bool = true, testScript: String? = nil) throws -> Process {
         try validate()
-        let p = Process(); p.executableURL = runtime.appendingPathComponent("xash3d"); p.currentDirectoryURL = data
+        // The window-owning process must retain our app identity and Game Mode
+        // metadata. A bare Runtime/xash3d child does not inherit them.
+        let p = Process(); p.executableURL = Bundle.main.executableURL; p.currentDirectoryURL = data
         var env = ProcessInfo.processInfo.environment
         for key in env.keys where key.hasPrefix("BHL_") || key.hasPrefix("SDL_") || key.hasPrefix("DYLD_") || key.hasPrefix("XASH3D_") { env.removeValue(forKey: key) }
         env["BHL_IMAGE_DIR"] = resources.appendingPathComponent("Images").path
         env["XASH3D_BASEDIR"] = data.path
         env["XASH3D_EXTRAS_PAK1"] = resources.appendingPathComponent("extras.pk3").path
         env["DYLD_LIBRARY_PATH"] = runtime.path
+        env["SDL_EGL_LIBRARY"] = runtime.appendingPathComponent("libEGL.dylib").path
+        env["SDL_OPENGL_LIBRARY"] = runtime.appendingPathComponent("libGLESv2.dylib").path
+        env["ANGLE_DEFAULT_PLATFORM"] = "metal"
+        env["SDL_VIDEO_MAC_FULLSCREEN_SPACES"] = "1"
         let sizes = [(1280, 720), (1600, 900), (1920, 1080), (2560, 1440)]
         let size = sizes[min(max(resolution, 0), sizes.count - 1)]
-        var args = ["-game", "bhl", "-ref", "gl", "-dll", runtime.appendingPathComponent("hl_arm64.dylib").path,
+        var args = ["--run-engine", "-game", "bhl", "-ref", "metal", "-metal", "-dll", runtime.appendingPathComponent("hl_arm64.dylib").path,
                     "-clientlib", runtime.appendingPathComponent("client_arm64.dylib").path,
                     "-menulib", runtime.appendingPathComponent("libmenu.dylib").path,
-                    fullscreen ? "-fullscreen" : "-windowed", "-width", String(size.0), "-height", String(size.1),
+                    fullscreen ? "-borderless" : "-windowed", "-width", String(size.0), "-height", String(size.1),
                     "-noip", "-noip6", "-nomaster", "+sv_lan", "1", "+cl_lw", "0", "+skill", String(difficulty + 1)]
         if let script = testScript {
             guard script.range(of: "^[A-Za-z0-9_-]+\\.cfg$", options: .regularExpression) != nil,
                   FileManager.default.fileExists(atPath: mod.appendingPathComponent(script).path) else { throw failure("Invalid acceptance script.") }
             env["SDL_VIDEODRIVER"] = "cocoa"; env["SDL_AUDIODRIVER"] = "dummy"
             env["DYLD_PRINT_LIBRARIES"] = "1"
-            args += ["-hidden", "-nomouse", "-nowriteconfig", "-dev", "3", "+exec", script]
+            if !CommandLine.arguments.contains("--engine-test-visible") { args += ["-hidden"] }
+            args += ["-nomouse", "-nowriteconfig", "-dev", "3", "+exec", script]
         } else {
             let limits = [120, 60, 1000]
             args += ["+fps_max", String(limits[min(max(frameRate, 0), limits.count - 1)]), "+gl_vsync", vsync ? "1" : "0"]
@@ -138,9 +147,11 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.appearance = NSAppearance(named: .darkAqua); window.isReleasedWhenClosed = false; window.delegate = self; window.contentView = content
         mode = picker("START", ["Game menu", "New campaign", "Weapon showcase", "Continue latest save"], y: 245, key: "mode")
         display = picker("RESOLUTION", ["1280 × 720", "1600 × 900", "1920 × 1080", "2560 × 1440"], y: 294, key: "resolution")
+        display.toolTip = "Window size. Native fullscreen uses your display's desktop resolution."
         frameRate = picker("FRAME RATE", ["120 FPS limit", "60 FPS limit", "Uncapped"], y: 343, key: "frameRate")
         difficulty = picker("DIFFICULTY", ["Easy", "Normal", "Hard"], y: 392, key: "difficulty")
         fullscreen = NSButton(checkboxWithTitle: "Fullscreen", target: nil, action: nil)
+        fullscreen.toolTip = "Use macOS fullscreen, with automatic Game Mode when enabled in macOS."
         fullscreen.frame = NSRect(x: 265, y: 438, width: 185, height: 30); fullscreen.state = defaults.bool(forKey: "fullscreen") ? .on : .off
         content.addSubview(fullscreen)
         vsync = NSButton(checkboxWithTitle: "VSync", target: nil, action: nil)
@@ -149,7 +160,7 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
         _ = button("CONTROLS", NSRect(x: 40, y: 494, width: 208, height: 46), #selector(controls))
         _ = button("SAVED GAMES", NSRect(x: 266, y: 494, width: 208, height: 46), #selector(openSaves))
         _ = button("FILES & LOG", NSRect(x: 492, y: 494, width: 208, height: 46), #selector(openFiles))
-        status = label("Local development build · Campaign validation in progress", NSRect(x: 40, y: 565, width: 660, height: 42), size: 12, color: muted)
+        status = label("Metal graphics · Local development build", NSRect(x: 40, y: 565, width: 660, height: 42), size: 12, color: muted)
         status.alignment = .center; content.addSubview(status)
         let quit = button("QUIT", NSRect(x: 141, y: 632, width: 220, height: 52), #selector(quitApp)); quit.keyEquivalent = "\u{1b}"
         play = button("PLAY", NSRect(x: 379, y: 632, width: 220, height: 52), #selector(playGame)); play.primary = true; play.keyEquivalent = "\r"
@@ -183,7 +194,8 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         do {
             let p = try installation.process(mode: mode?.indexOfSelectedItem ?? 0, resolution: display?.indexOfSelectedItem ?? 0,
-                                             fullscreen: fullscreen?.state == .on, difficulty: difficulty?.indexOfSelectedItem ?? 1,
+                                             fullscreen: testScript != nil ? CommandLine.arguments.contains("--engine-test-fullscreen") : fullscreen?.state == .on,
+                                             difficulty: difficulty?.indexOfSelectedItem ?? 1,
                                              frameRate: frameRate?.indexOfSelectedItem ?? 0, vsync: vsync?.state != .off, testScript: testScript)
             FileManager.default.createFile(atPath: installation.log.path, contents: nil)
             let handle = try FileHandle(forWritingTo: installation.log); try handle.truncate(atOffset: 0)
@@ -241,5 +253,6 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return true
     }
 }
+if CommandLine.arguments.dropFirst().first == "--run-engine" { runBundledEngine() }
 let app = NSApplication.shared
 let delegate = Launcher(); app.delegate = delegate; app.run()

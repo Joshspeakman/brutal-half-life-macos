@@ -1,0 +1,667 @@
+--- a/engine/client/dll_int/ref_common.c
++++ b/engine/client/dll_int/ref_common.c
+@@ -689,6 +689,18 @@
+ 
+ static void R_CollectRendererNames( void )
+ {
++#if XASH_APPLE && XASH_REF_GLES3COMPAT_ENABLED
++	if( Sys_CheckParm( "-metal" ))
++	{
++		static const char *metal_short[] = { "metal" };
++		static const char *metal_long[] = { "Metal (ANGLE)" };
++		ref.num_renderers = 1;
++		ref.short_names = metal_short;
++		ref.long_names = metal_long;
++		return;
++	}
++#endif
++
+ 	// ordering is important!
+ 	static const char *short_names[] =
+ 	{
+--- a/engine/platform/sdl2/vid_sdl2.c
++++ b/engine/platform/sdl2/vid_sdl2.c
+@@ -332,6 +332,25 @@
+ */
+ void *GL_GetProcAddress( const char *name )
+ {
++#if XASH_APPLE
++	if( Sys_CheckParm( "-metal" ))
++	{
++		// SDL's dlsym fallback can find desktop ARB exports in ANGLE's
++		// OpenGL framework dependency. Never mix those with an EGL context.
++		static void *egl_library;
++		static void *(*egl_proc)( const char * );
++		if( !egl_proc )
++		{
++			const char *path = SDL_getenv( "SDL_EGL_LIBRARY" );
++			if( !path || !( egl_library = SDL_LoadObject( path )))
++				Host_Error( "Metal: bundled EGL library unavailable" );
++			egl_proc = SDL_LoadFunction( egl_library, "eglGetProcAddress" );
++			if( !egl_proc ) Host_Error( "Metal: EGL entry point unavailable" );
++		}
++		return egl_proc( name );
++	}
++#endif
++
+ 	void *func = SDL_GL_GetProcAddress( name );
+ 
+ #if XASH_PSVITA
+@@ -927,11 +946,28 @@
+ 		glw_state.software = true;
+ 		break;
+ 	case REF_GL:
++#if XASH_APPLE
++		if( Sys_CheckParm( "-metal" ))
++		{
++			SDL_setenv( "ANGLE_DEFAULT_PLATFORM", "metal", 1 );
++			SDL_SetHint( SDL_HINT_OPENGL_ES_DRIVER, "1" );
++		}
++#endif
+ 		if( !glw_state.safe && Sys_GetParmFromCmdLine( "-safegl", safe ) )
+ 			glw_state.safe = bound( SAFE_NO, Q_atoi( safe ), SAFE_DONTCARE );
+ 
+ 		// refdll can request some attributes
+ 		GL_SetupAttributes( );
++#if XASH_APPLE
++		if( Sys_CheckParm( "-metal" ))
++		{
++			int profile = 0;
++			SDL_GL_GetAttribute( SDL_GL_CONTEXT_PROFILE_MASK, &profile );
++			if( profile != SDL_GL_CONTEXT_PROFILE_ES )
++				Host_Error( "Metal requires the Metal renderer; OpenGL fallback is disabled" );
++		}
++#endif
++
+ 
+ 		if( SDL_GL_LoadLibrary( EGL_LIB ) < 0 )
+ 		{
+@@ -968,6 +1004,15 @@
+ rserr_t R_ChangeDisplaySettings( int width, int height, window_mode_t window_mode )
+ {
+ 	rserr_t err;
++#if XASH_APPLE
++	// The in-game menu also requests mode 1. Use native fullscreen Spaces
++	// for that path, so it remains eligible for macOS Game Mode.
++	if( window_mode == WINDOW_MODE_FULLSCREEN )
++	{
++		window_mode = WINDOW_MODE_BORDERLESS;
++		Cvar_DirectSetValue( &vid_fullscreen, WINDOW_MODE_BORDERLESS );
++	}
++#endif
+ 
+ 	if( !host.hWnd )
+ 		err = VID_CreateWindow( width, height, window_mode );
+--- a/ref/gl/gl2_shim/fragment.glsl.inc
++++ b/ref/gl/gl2_shim/fragment.glsl.inc
+@@ -25,6 +25,8 @@
+ "#endif\n"
+ "#if FEAT_FOG\n"
+ "uniform PREC vec4 uFog;\n"
++"uniform highp vec4 uFogParams;\n"
++"in highp float vFogDepth;\n"
+ "#endif\n"
+ "uniform PREC vec4 uColor;\n"
+ "#if ATTR_COLOR\n"
+@@ -44,6 +46,13 @@
+ "#else\n"
+ "#define oFragColor gl_FragColor\n"
+ "#endif\n"
++"uniform vec4 uTexEnv;\n"
++"vec4 texEnv(vec4 c, vec4 t, float mode, float alpha) {\n"
++"    if (mode < 0.5) return c * t;\n"
++"    if (mode < 1.5) return vec4(t.rgb, alpha > 0.5 ? t.a : c.a);\n"
++"    if (mode < 2.5) return vec4(alpha > 0.5 ? mix(c.rgb, t.rgb, t.a) : t.rgb, c.a);\n"
++"    return vec4(min(c.rgb + t.rgb, vec3(1.0)), c.a * t.a);\n"
++"}\n"
+ "void main()\n"
+ "{\n"
+ "#if ATTR_COLOR\n"
+@@ -52,18 +61,23 @@
+ "PREC vec4 c = uColor;\n"
+ "#endif\n"
+ "#if ATTR_TEXCOORD0\n"
+-"c = c * texture(uTex0, vTexCoord0);\n"
++"c = texEnv(c, texture(uTex0, vTexCoord0), uTexEnv.x, uTexEnv.z);\n"
+ "#endif\n"
+ "#if ATTR_TEXCOORD1\n"
+-"c = c * texture(uTex1, vTexCoord1);\n"
++"c = texEnv(c, texture(uTex1, vTexCoord1), uTexEnv.y, uTexEnv.w);\n"
+ "#endif\n"
+ "#if FEAT_ALPHA_TEST\n"
+ "if(c.a <= uAlphaTest)\n"
+ "discard;\n"
+ "#endif\n"
+ "#if FEAT_FOG\n"
+-"float fogDist = gl_FragCoord.z / gl_FragCoord.w;\n"
+-"float fogRate = clamp(exp(-uFog.w * fogDist), 0.0, 1.0);\n"
++"highp float d = uFogParams.w * vFogDepth;\n"
++"highp float fogRate;\n"
++"if (uFogParams.x < 0.5)\n"
++"    fogRate = (uFogParams.z - vFogDepth) / max(uFogParams.z - uFogParams.y, 0.00001);\n"
++"else if (uFogParams.x < 1.5) fogRate = exp(-d);\n"
++"else fogRate = exp(-d * d);\n"
++"fogRate = clamp(fogRate, 0.0, 1.0);\n"
+ "c.rgb = mix(uFog.rgb, c.rgb, fogRate);\n"
+ "#endif\n"
+ "oFragColor = c;\n"
+--- a/ref/gl/gl2_shim/gl2_shim.c
++++ b/ref/gl/gl2_shim/gl2_shim.c
+@@ -22,8 +22,8 @@
+ It just allows to draw similar way as in native legacy context, but in es/core contexts
+ 
+ Limitations:
+-1. Matrix support is very limited, only combined MVP
+-2. No TexEnv support, multitexture always works in MODULATE mode
++1. Matrix stacks are not implemented. Modelview/projection and two texture matrices are supported.
++2. TexEnv supports MODULATE, REPLACE, DECAL and ADD. General combiners are not advertised.
+ 3. DrawElements with client pointers will not work on CORE/WEBGL contexts, DrawRangeElements will
+ 4. No quads in arrays drawing (simple DrawArrays(GL_QUADS) may be implemented, but DrawElements not)
+ 5. Textures are enabled with texcoord attribs, not glEnable (can be changed, but who cares?)
+@@ -68,7 +68,7 @@
+ 	GLint ualpha;
+ 	GLint utex0;
+ 	GLint utex1;
+-	GLint ufog;
++	GLint ufog, ufogparams, uMV, utexenv, utexmat[2];
+ 	GLint uMVP;
+ 	GLuint *vao_begin;
+ } gl2wrap_prog_t;
+@@ -95,8 +95,10 @@
+ 	GLint end;
+ 	GLenum prim;
+ 	GLfloat color[4];
+-	GLfloat fog[4]; // color + density
++	GLfloat fog[4]; // RGBA
++	GLfloat fogparams[4]; // mode (linear/exp/exp2), start, end, density
+ 	GLfloat alpharef;
++	GLfloat texenv[4]; // mode0, mode1, alpha0, alpha1
+ 	gl2wrap_prog_t progs[MAX_PROGS];
+ 	gl2wrap_prog_t *cur_prog;
+ 	GLboolean uchanged;
+@@ -118,7 +120,7 @@
+ 
+ static struct
+ {
+-	float mvp[16], mv[16], pr[16], dummy[16];
++	float mvp[16], mv[16], pr[16], tex[2][16], dummy[16];
+ 	GLenum mode;
+ 	float *current;
+ 	uint64_t update;
+@@ -129,7 +131,7 @@
+ 	qboolean alpha_test;
+ 	qboolean fog;
+ 	GLuint vbo;
+-	GLuint tmu;
++	GLuint tmu, active_tmu, bound_texture[2];
+ } gl2wrap_state;
+ 
+ //#define QUAD_BATCH
+@@ -175,6 +177,48 @@
+ 
+ static void GL2_FreeArrays( void );
+ 
++// Remember the original RGB/RGBA distinction after GLES converts uploads to RGBA.
++// It controls REPLACE/DECAL alpha behavior. Texture names can be any GLuint.
++typedef struct gl2_texinfo_s
++{
++	GLuint name;
++	GLboolean alpha;
++	struct gl2_texinfo_s *next;
++} gl2_texinfo_t;
++static gl2_texinfo_t *gl2_textures[256];
++static gl2_texinfo_t *GL2_TextureInfo( GLuint name, qboolean create )
++{
++	unsigned bucket = name % ARRAYSIZE( gl2_textures );
++	gl2_texinfo_t *p;
++	for( p = gl2_textures[bucket]; p; p = p->next )
++		if( p->name == name ) return p;
++	if( !create ) return NULL;
++	p = Mem_Calloc( r_temppool, sizeof( *p ));
++	p->name = name; p->alpha = GL_TRUE;
++	p->next = gl2_textures[bucket]; gl2_textures[bucket] = p;
++	return p;
++}
++#ifndef QUAD_BATCH
++static void (APIENTRY *rpglBindTexture)( GLenum target, GLuint name );
++static void APIENTRY GL2_BindTexture( GLenum target, GLuint name )
++{
++	unsigned unit = gl2wrap_state.active_tmu;
++	if( target == GL_TEXTURE_2D && unit < 2 )
++	{
++		gl2_texinfo_t *info = GL2_TextureInfo( name, false );
++		gl2wrap_state.bound_texture[unit] = name;
++		GLfloat alpha = info ? info->alpha : 1.f;
++		if( gl2wrap.texenv[2 + unit] != alpha )
++		{
++			gl2wrap.texenv[2 + unit] = alpha;
++			gl2wrap.uchanged = GL_TRUE;
++		}
++	}
++	rpglBindTexture( target, name );
++}
++#endif
++
++
+ #ifdef QUAD_BATCH
+ static void GL2_FlushPrims( void );
+ static void (APIENTRY *rpglBindTexture)( GLenum tex, GLuint obj );
+@@ -366,6 +410,11 @@
+ 	prog->utex0  = pglGetUniformLocationARB( glprog, "uTex0" );
+ 	prog->utex1  = pglGetUniformLocationARB( glprog, "uTex1" );
+ 	prog->ufog   = pglGetUniformLocationARB( glprog, "uFog" );
++	prog->ufogparams = pglGetUniformLocationARB( glprog, "uFogParams" );
++	prog->uMV = pglGetUniformLocationARB( glprog, "uMV" );
++	prog->utexenv = pglGetUniformLocationARB( glprog, "uTexEnv" );
++	prog->utexmat[0] = pglGetUniformLocationARB( glprog, "uTexMatrix0" );
++	prog->utexmat[1] = pglGetUniformLocationARB( glprog, "uTexMatrix1" );
+ 	prog->uMVP   = pglGetUniformLocationARB( glprog, "uMVP" );
+ 
+ 	if( gl2wrap_config.vao_mandatory )
+@@ -427,6 +476,10 @@
+ 				pglUniform4fvARB( prog->ucolor, 1, gl2wrap.color );
+ 			if( prog->ufog >= 0 )
+ 				pglUniform4fvARB( prog->ufog, 1, gl2wrap.fog );
++			if( prog->utexenv >= 0 )
++				pglUniform4fvARB( prog->utexenv, 1, gl2wrap.texenv );
++			if( prog->ufogparams >= 0 )
++				pglUniform4fvARB( prog->ufogparams, 1, gl2wrap.fogparams );
+ 			gl2wrap.uchanged = GL_FALSE;
+ 		}
+ 		GL2_UpdateMVP( prog );
+@@ -604,7 +657,11 @@
+ 	if( gEngfuncs.Sys_CheckParm( "-noincremental" ))
+ 		gl2wrap_config.incremental = gl2wrap_config.buf_storage = false;
+ 
++	#if XASH_ANGLE_METAL
++	gl2wrap_config.version = 300;
++#else
+ 	gl2wrap_config.version = 310;
++#endif
+ 	if( gEngfuncs.Sys_CheckParm( "-minshaders" ))
+ 		gl2wrap_config.version = 100;
+ 	if( gl2wrap_config.buf_storage )
+@@ -628,6 +685,14 @@
+ 		gl2wrap_config.cycle_buffers, gl2wrap_config.version );
+ 
+ 	memset( &gl2wrap, 0, sizeof( gl2wrap ));
++	memset( &gl2wrap_state, 0, sizeof( gl2wrap_state ));
++	memset( &gl2wrap_matrix, 0, sizeof( gl2wrap_matrix ));
++	for( int i = 0; i < 16; i += 5 )
++		gl2wrap_matrix.mv[i] = gl2wrap_matrix.pr[i] = gl2wrap_matrix.tex[0][i] = gl2wrap_matrix.tex[1][i] = 1.f;
++	gl2wrap_matrix.current = gl2wrap_matrix.mv;
++	gl2wrap_matrix.mode = GL_MODELVIEW;
++	gl2wrap_matrix.update = ~0ULL;
++	gl2wrap.texenv[2] = gl2wrap.texenv[3] = 1.f;
+ 	GL2_ShimInstall();
+ 	GL2_InitTriQuads();
+ 
+@@ -635,6 +700,7 @@
+ 	gl2wrap.color[1] = 1.f;
+ 	gl2wrap.color[2] = 1.f;
+ 	gl2wrap.color[3] = 1.f;
++	gl2wrap.fogparams[0] = gl2wrap.fogparams[2] = gl2wrap.fogparams[3] = 1.f;
+ 	gl2wrap.uchanged = GL_TRUE;
+ 
+ 	total = 0;
+@@ -711,6 +777,12 @@
+ 
+ void GL2_ShimShutdown( void )
+ {
++	for( unsigned i = 0; i < ARRAYSIZE( gl2_textures ); ++i )
++	{
++		gl2_texinfo_t *p = gl2_textures[i];
++		while( p ) { gl2_texinfo_t *next = p->next; Mem_Free( p ); p = next; }
++		gl2_textures[i] = NULL;
++	}
+ 	if( !gl2wrap_init )
+ 		return;
+ 
+@@ -1029,6 +1101,17 @@
+ static void APIENTRY GL2_TexImage2D( GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *pixels )
+ {
+ 	void *data = (void *)pixels;
++	if( target == GL_TEXTURE_2D && level == 0 && gl2wrap_state.active_tmu < 2 )
++	{
++		unsigned unit = gl2wrap_state.active_tmu;
++		gl2_texinfo_t *info = GL2_TextureInfo( gl2wrap_state.bound_texture[unit], true );
++		info->alpha = !( internalformat == GL_RGB || internalformat == GL_RGB8 || internalformat == GL_RGB5 ||
++			internalformat == GL_LUMINANCE || internalformat == GL_LUMINANCE8 || internalformat == GL_LUMINANCE4 );
++		for( unsigned i = 0; i < 2; ++i )
++			if( gl2wrap_state.bound_texture[i] == info->name ) gl2wrap.texenv[2+i] = info->alpha;
++		gl2wrap.uchanged = GL_TRUE;
++	}
++
+ 	if( pixels && format == GL_RGBA && (
+ 		internalformat == GL_RGB ||
+ 		internalformat == GL_RGB8 ||
+@@ -1206,22 +1289,27 @@
+ 
+ static void APIENTRY GL2_Fogf( GLenum param, GLfloat val )
+ {
+-	if( param == GL_FOG_DENSITY )
+-	{
+-		gl2wrap.fog[3] = val;
++	switch( param )
++	{
++	case GL_FOG_MODE:
++		gl2wrap.fogparams[0] = (int)val == GL_LINEAR ? 0.f : (int)val == GL_EXP2 ? 2.f : 1.f;
++		break;
++	case GL_FOG_START: gl2wrap.fogparams[1] = val; break;
++	case GL_FOG_END: gl2wrap.fogparams[2] = val; break;
++	case GL_FOG_DENSITY: gl2wrap.fogparams[3] = val; break;
++	default: return;
++	}
++	gl2wrap.uchanged = GL_TRUE;
++}
++
++static void APIENTRY GL2_Fogfv( GLenum param, const GLfloat *val )
++{
++	if( param == GL_FOG_COLOR )
++	{
++		Vector4Copy( val, gl2wrap.fog );
+ 		gl2wrap.uchanged = GL_TRUE;
+ 	}
+-}
+-
+-static void APIENTRY GL2_Fogfv( GLenum param, const GLfloat *val )
+-{
+-	if( param == GL_FOG_COLOR )
+-	{
+-		gl2wrap.fog[0] = val[0];
+-		gl2wrap.fog[1] = val[1];
+-		gl2wrap.fog[2] = val[2];
+-		gl2wrap.uchanged = GL_TRUE;
+-	}
++	else GL2_Fogf( param, *val );
+ }
+ 
+ static qboolean GL2_SkipEnable( GLenum e )
+@@ -1276,6 +1364,9 @@
+ 		break;
+ 	case GL_PROJECTION:
+ 		gl2wrap_matrix.current = gl2wrap_matrix.pr;
++		break;
++	case GL_TEXTURE:
++		gl2wrap_matrix.current = gl2wrap_state.active_tmu < 2 ? gl2wrap_matrix.tex[gl2wrap_state.active_tmu] : gl2wrap_matrix.dummy;
+ 		break;
+ 	default:
+ 		gl2wrap_matrix.current = gl2wrap_matrix.dummy;
+@@ -1350,6 +1441,10 @@
+ 		ClearBits( gl2wrap_matrix.update, BIT64( prog->flags ));
+ 		GL2_Mul4x4( gl2wrap_matrix.mv, gl2wrap_matrix.pr, gl2wrap_matrix.mvp );
+ 		pglUniformMatrix4fvARB( prog->uMVP, 1, false, (void *)gl2wrap_matrix.mvp );
++		for( int i = 0; i < 2; ++i )
++			if( prog->utexmat[i] >= 0 ) pglUniformMatrix4fvARB( prog->utexmat[i], 1, false, gl2wrap_matrix.tex[i] );
++		if( prog->uMV >= 0 )
++			pglUniformMatrix4fvARB( prog->uMV, 1, false, gl2wrap_matrix.mv );
+ 	}
+ }
+ 
+@@ -1732,12 +1827,13 @@
+ 	rpglBindBufferARB( buf, obj );
+ }
+ 
+-#if 0
++static void (APIENTRY *rpglActiveTextureARB)( GLenum tex );
+ static void APIENTRY GL2_ActiveTextureARB( GLenum tex )
+ {
+-	//gl2wrap_arrays.texture = GL_TEXTURE0_ARB - tex;
+-}
+-#endif
++	gl2wrap_state.active_tmu = tex - GL_TEXTURE0_ARB;
++	if( gl2wrap_matrix.mode == GL_TEXTURE ) GL2_MatrixMode( GL_TEXTURE );
++	rpglActiveTextureARB( tex );
++}
+ 
+ static void APIENTRY GL2_ClientActiveTextureARB( GLenum tex )
+ {
+@@ -1767,22 +1863,37 @@
+ 
+ static void APIENTRY GL2_Scalef(GLfloat x, GLfloat y, GLfloat z)
+ {
++	float *m = gl2wrap_matrix.current;
++	for( int i = 0; i < 4; ++i ) { m[i] *= x; m[4+i] *= y; m[8+i] *= z; }
++	gl2wrap_matrix.update = ~0ULL;
+ }
+ 
+ static void APIENTRY GL2_Translatef(GLfloat x, GLfloat y, GLfloat z)
+ {
++	float *m = gl2wrap_matrix.current;
++	for( int i = 0; i < 4; ++i ) m[12+i] += m[i]*x + m[4+i]*y + m[8+i]*z;
++	gl2wrap_matrix.update = ~0ULL;
+ }
+ 
+ static void APIENTRY GL2_TexEnvi(GLenum target, GLenum pname, GLint param)
+ {
++	if( target != GL_TEXTURE_ENV || pname != GL_TEXTURE_ENV_MODE || gl2wrap_state.active_tmu >= 2 ) return;
++	GLfloat mode = param == GL_REPLACE ? 1.f : param == GL_DECAL ? 2.f : param == GL_ADD ? 3.f : 0.f;
++	if( gl2wrap.texenv[gl2wrap_state.active_tmu] != mode )
++	{
++		gl2wrap.texenv[gl2wrap_state.active_tmu] = mode;
++		gl2wrap.uchanged = GL_TRUE;
++	}
+ }
+ 
+ static void APIENTRY GL2_TexEnvf(GLenum target, GLenum pname, GLfloat param)
+ {
++	GL2_TexEnvi( target, pname, param );
+ }
+ 
+ static void APIENTRY GL2_Fogi(GLenum pname, GLint param)
+ {
++	GL2_Fogf( pname, param );
+ }
+ 
+ static void APIENTRY GL2_ShadeModel(GLenum mode)
+@@ -1839,9 +1950,7 @@
+ 	GL2_OVERRIDE_PTR( TexEnvi )
+ 	GL2_OVERRIDE_PTR( TexEnvf )
+ 	GL2_OVERRIDE_PTR( ClientActiveTextureARB )
+-#if 0 // FIXME: figure out why it's disabled
+-	GL2_OVERRIDE_PTR( ActiveTextureARB )
+-#endif
++	GL2_OVERRIDE_PTR_B( ActiveTextureARB )
+ 	GL2_OVERRIDE_PTR( Fogi )
+ 	GL2_OVERRIDE_PTR( ShadeModel )
+ #if XASH_GLES
+@@ -1870,9 +1979,7 @@
+ 	GL2_OVERRIDE_PTR( ColorPointer )
+ 	GL2_OVERRIDE_PTR( TexCoordPointer )
+ 
+-#ifdef QUAD_BATCH
+ 	GL2_OVERRIDE_PTR_B( BindTexture )
++	GL2_AllocArrays();
++}
+ #endif
+-	GL2_AllocArrays();
+-}
+-#endif
+--- a/ref/gl/gl2_shim/vertex.glsl.inc
++++ b/ref/gl/gl2_shim/vertex.glsl.inc
+@@ -34,10 +34,19 @@
+ "#endif\n"
+ "\n"
+ "uniform mat4 uMVP;\n"
++"uniform mat4 uTexMatrix0;\n"
++"uniform mat4 uTexMatrix1;\n"
++"#if FEAT_FOG\n"
++"uniform mat4 uMV;\n"
++"out highp float vFogDepth;\n"
++"#endif\n"
+ "\n"
+ "void main()\n"
+ "{\n"
+ "gl_Position = uMVP * vec4(inPosition,1.0);\n"
++"#if FEAT_FOG\n"
++"vFogDepth = abs((uMV * vec4(inPosition, 1.0)).z);\n"
++"#endif\n"
+ "#if ATTR_COLOR\n"
+ "vColor = inColor;\n"
+ "#endif\n"
+@@ -45,9 +54,9 @@
+ "vNormal = inNormal;\n"
+ "#endif\n"
+ "#if ATTR_TEXCOORD0\n"
+-"vTexCoord0 = inTexCoord0;\n"
++"vTexCoord0 = (uTexMatrix0 * vec4(inTexCoord0, 0.0, 1.0)).xy;\n"
+ "#endif\n"
+ "#if ATTR_TEXCOORD1\n"
+-"vTexCoord1 = inTexCoord1;\n"
++"vTexCoord1 = (uTexMatrix1 * vec4(inTexCoord1, 0.0, 1.0)).xy;\n"
+ "#endif\n"
+ "}\n"
+--- a/ref/gl/gl_context.c
++++ b/ref/gl/gl_context.c
+@@ -381,6 +381,45 @@
+ 
+ static void* GAME_EXPORT R_GetProcAddress( const char *name )
+ {
++#if XASH_GLES3COMPAT
++	// External client calls must share the renderer's fixed-function shader state.
++	if( !Q_strcmp( name, "glEnable" )) return pglEnable;
++	if( !Q_strcmp( name, "glDisable" )) return pglDisable;
++	if( !Q_strcmp( name, "glFogi" )) return pglFogi;
++	if( !Q_strcmp( name, "glFogf" )) return pglFogf;
++	if( !Q_strcmp( name, "glFogfv" )) return pglFogfv;
++	if( !Q_strcmp( name, "glBegin" )) return pglBegin;
++	if( !Q_strcmp( name, "glEnd" )) return pglEnd;
++	if( !Q_strcmp( name, "glVertex2f" )) return pglVertex2f;
++	if( !Q_strcmp( name, "glVertex3f" )) return pglVertex3f;
++	if( !Q_strcmp( name, "glColor4f" )) return pglColor4f;
++	if( !Q_strcmp( name, "glTexCoord2f" )) return pglTexCoord2f;
++	if( !Q_strcmp( name, "glMultiTexCoord2f" )) return pglMultiTexCoord2f;
++	if( !Q_strcmp( name, "glAlphaFunc" )) return pglAlphaFunc;
++	if( !Q_strcmp( name, "glMatrixMode" )) return pglMatrixMode;
++	if( !Q_strcmp( name, "glLoadIdentity" )) return pglLoadIdentity;
++	if( !Q_strcmp( name, "glOrtho" )) return pglOrtho;
++	if( !Q_strcmp( name, "glLoadMatrixf" )) return pglLoadMatrixf;
++	if( !Q_strcmp( name, "glScalef" )) return pglScalef;
++	if( !Q_strcmp( name, "glTranslatef" )) return pglTranslatef;
++	if( !Q_strcmp( name, "glTexEnvi" )) return pglTexEnvi;
++	if( !Q_strcmp( name, "glTexEnvf" )) return pglTexEnvf;
++	if( !Q_strcmp( name, "glActiveTextureARB" )) return pglActiveTextureARB;
++	if( !Q_strcmp( name, "glClientActiveTextureARB" )) return pglClientActiveTextureARB;
++	if( !Q_strcmp( name, "glBindTexture" )) return pglBindTexture;
++	if( !Q_strcmp( name, "glTexImage2D" )) return pglTexImage2D;
++	if( !Q_strcmp( name, "glTexParameteri" )) return pglTexParameteri;
++	if( !Q_strcmp( name, "glGetFloatv" )) return pglGetFloatv;
++	if( !Q_strcmp( name, "glIsEnabled" )) return pglIsEnabled;
++	if( !Q_strcmp( name, "glDrawElements" )) return pglDrawElements;
++	if( !Q_strcmp( name, "glDrawArrays" )) return pglDrawArrays;
++	if( !Q_strcmp( name, "glEnableClientState" )) return pglEnableClientState;
++	if( !Q_strcmp( name, "glDisableClientState" )) return pglDisableClientState;
++	if( !Q_strcmp( name, "glVertexPointer" )) return pglVertexPointer;
++	if( !Q_strcmp( name, "glColorPointer" )) return pglColorPointer;
++	if( !Q_strcmp( name, "glTexCoordPointer" )) return pglTexCoordPointer;
++#endif
++
+ #if XASH_GL4ES
+ 	return gl4es_GetProcAddress( name );
+ #else // TODO: other wrappers
+--- a/ref/gl/gl_opengl.c
++++ b/ref/gl/gl_opengl.c
+@@ -184,10 +184,17 @@
+ 
+ static const dllfunc_t debugoutputfuncs[] =
+ {
++#if XASH_ANGLE_METAL
++{ "glDebugMessageControlKHR", (void **)&pglDebugMessageControlARB },
++{ "glDebugMessageInsertKHR", (void **)&pglDebugMessageInsertARB },
++{ "glDebugMessageCallbackKHR", (void **)&pglDebugMessageCallbackARB },
++{ "glGetDebugMessageLogKHR", (void **)&pglGetDebugMessageLogARB },
++#else
+ { GL_CALL( glDebugMessageControlARB ) },
+ { GL_CALL( glDebugMessageInsertARB ) },
+ { GL_CALL( glDebugMessageCallbackARB ) },
+ { GL_CALL( glGetDebugMessageLogARB ) },
++#endif
+ };
+ 
+ static const dllfunc_t multitexturefuncs[] =
+@@ -265,7 +272,13 @@
+ 
+ static const dllfunc_t drawrangeelementsbasevertexfuncs[] =
+ {
++#if XASH_ANGLE_METAL
++// EGL returns core entry points even when the context is older than the API.
++// ES 3.0 exposes base-vertex draws through OES, not the ES 3.2 core command.
++{ "glDrawRangeElementsBaseVertexOES", (void **)&pglDrawRangeElementsBaseVertex },
++#else
+ { GL_CALL( glDrawRangeElementsBaseVertex ) },
++#endif
+ };
+ 
+ static const dllfunc_t bufferstoragefuncs[] =
+@@ -817,7 +830,11 @@
+ 			}
+ 			GL_SetExtension( extid, true ); // required to be supported by wrapper
+ 
++#if XASH_GLES3COMPAT
++			pglGetIntegerv( GL_MAX_TEXTURE_IMAGE_UNITS_ARB, &glConfig.max_texture_units );
++#else
+ 			pglGetIntegerv( GL_MAX_TEXTURE_UNITS_ARB, &glConfig.max_texture_units );
++#endif
+ 			if( glConfig.max_texture_units <= 1 )
+ 				pglGetIntegerv( GL_MAX_TEXTURE_IMAGE_UNITS_ARB, &glConfig.max_texture_units );
+ 			if( glConfig.max_texture_units <= 1 )
+@@ -919,7 +936,8 @@
+ 		}
+ 	}
+ #if !XASH_GL_STATIC
+-	GL2_ShimInit();
++	if( GL2_ShimInit() )
++		gEngfuncs.Host_Error( "Fixed-function shader initialization failed" );
+ #endif
+ }
+ #else
+@@ -1105,6 +1123,23 @@
+ 	glConfig.vendor_string = (const char *)pglGetString( GL_VENDOR );
+ 	glConfig.renderer_string = (const char *)pglGetString( GL_RENDERER );
+ 	glConfig.version_string = (const char *)pglGetString( GL_VERSION );
++#if XASH_ANGLE_METAL
++	if( !glConfig.renderer_string || !Q_strstr( glConfig.renderer_string, "ANGLE Metal Renderer:" ))
++		gEngfuncs.Host_Error( "Metal renderer required; received %s", glConfig.renderer_string ? glConfig.renderer_string : "no renderer" );
++	gEngfuncs.Con_Printf( "BHL Metal backend verified: %s\n", glConfig.renderer_string );
++	// EGL_ANGLE_device_metal exposes the actual id<MTLDevice>, not a GL driver label.
++	void *(*get_display)( void ) = gEngfuncs.GL_GetProcAddress( "eglGetCurrentDisplay" );
++	unsigned (*query_display)( void *, int, intptr_t * ) = gEngfuncs.GL_GetProcAddress( "eglQueryDisplayAttribEXT" );
++	unsigned (*query_device)( void *, int, intptr_t * ) = gEngfuncs.GL_GetProcAddress( "eglQueryDeviceAttribEXT" );
++	intptr_t device = 0, metal_device = 0;
++	if( !get_display || !query_display || !query_device ||
++		!query_display( get_display(), 0x322C /* EGL_DEVICE_EXT */, &device ) ||
++		!query_device( (void *)device, 0x34A6 /* EGL_METAL_DEVICE_ANGLE */, &metal_device ) || !metal_device )
++		gEngfuncs.Host_Error( "Metal: ANGLE did not expose a Metal device" );
++	gEngfuncs.Con_Printf( "BHL Metal device verified: EGL_ANGLE_device_metal\n" );
++
++#endif
++
+ 	glConfig.extensions_string = (const char *)pglGetString( GL_EXTENSIONS );
+ 
+ 	pglGetIntegerv( GL_MAJOR_VERSION, &major );
+@@ -1453,7 +1488,10 @@
+ #if XASH_GLES
+ 	gEngfuncs.GL_SetAttribute( REF_GL_CONTEXT_PROFILE_MASK, REF_GL_CONTEXT_PROFILE_ES );
+ 	gEngfuncs.GL_SetAttribute( REF_GL_CONTEXT_EGL, 1 );
+-#if XASH_NANOGL
++#if XASH_ANGLE_METAL
++	gEngfuncs.GL_SetAttribute( REF_GL_CONTEXT_MAJOR_VERSION, 3 );
++	gEngfuncs.GL_SetAttribute( REF_GL_CONTEXT_MINOR_VERSION, 0 );
++#elif XASH_NANOGL
+ 	gEngfuncs.GL_SetAttribute( REF_GL_CONTEXT_MAJOR_VERSION, 1 );
+ 	gEngfuncs.GL_SetAttribute( REF_GL_CONTEXT_MINOR_VERSION, 1 );
+ #else // !XASH_NANOGL
+--- a/ref/gl/wscript
++++ b/ref/gl/wscript
+@@ -56,6 +56,11 @@
+ 			'libs':    ['DL', 'gl4es', 'LOG'],
+ 			'defines': ['XASH_GL_STATIC=1', 'XASH_GL4ES=1'],
+ 		},
++		'ref_metal': {
++			'enable': bld.env.GLES3COMPAT and bld.env.DEST_OS == 'darwin',
++			'libs': [],
++			'defines': ['XASH_GLES3COMPAT=1', 'XASH_ANGLE_METAL=1'],
++		},
+ 		'ref_gles3compat': {
+ 			'enable':  bld.env.GLES3COMPAT,
+ 			'libs':    [],

@@ -26,3 +26,11 @@ The Unicode License V3 is retained in vendor/nls/LICENSE.txt.
 SDL2 is linked from the developer's installed library. UPX is a preparation
 tool, not a runtime dependency. No engine/audio/GUI binaries are distributed
 by this repository.
+
+Metal rendering uses ANGLE (BSD-style license), fetched as standalone ARM64
+libEGL/libGLESv2 libraries from the official Electron v43.7.7 distribution:
+https://github.com/electron/electron/releases/tag/v43.7.7
+The downloader pins and verifies the release archive SHA-256. The local app
+includes its license, third-party notices and dependency manifest under
+Contents/Resources/Licenses. Electron itself is not executed or bundled.
+Local GPL engine/shader changes are retained in patches/xash-metal-angle.patch.

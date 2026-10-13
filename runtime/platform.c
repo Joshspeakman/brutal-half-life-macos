@@ -1,4 +1,4 @@
-/* Native SDL input and OpenGL calls used directly by the original client. */
+/* Native SDL input and renderer-dispatched graphics calls from the client. */
 #include "win32.h"
 #include <SDL.h>
 #include <stdio.h>
@@ -8,6 +8,8 @@
 #define CDECL(v) do { c->eax=(uint32_t)(v);c->esp+=4;return 1; } while(0)
 #define STDCALL(v,n) do { c->eax=(uint32_t)(v);c->esp+=4+4*(n);return 1; } while(0)
 static SDL_GameController *controllers[32];
+static void *(*graphics_proc)(const char *);
+void bhl_set_graphics_proc(void *(*resolve)(const char *)) { graphics_proc=resolve; }
 static uint32_t controller_names[32];
 static SDL_GameController *controller(uint32_t h)
 {
@@ -48,7 +50,10 @@ int bhl_platform_import(Ctx *c,const char *qualified)
     }
     if(!strncasecmp(qualified,"OPENGL32.dll!",13)){
         if(!SDL_GL_GetCurrentContext()){fail(c,"OpenGL call without a native OpenGL context");return 1;}
-        void *symbol=SDL_GL_GetProcAddress(name);if(!symbol){fail(c,"native OpenGL entry missing");return 1;}
+        /* GLES/Metal emulates fog in the renderer's shaders. Resolving this
+           directly from SDL would bypass that state (GLES has no glFog). */
+        void *symbol=graphics_proc?graphics_proc(name):SDL_GL_GetProcAddress(name);
+        if(!symbol){fail(c,"native renderer entry missing");return 1;}
         if(!strcmp(name,"glEnable")||!strcmp(name,"glDisable")){((void(*)(unsigned))symbol)(A(0));STDCALL(0,1);}
         if(!strcmp(name,"glFogi")){((void(*)(unsigned,int))symbol)(A(0),A(1));STDCALL(0,2);}
         if(!strcmp(name,"glFogf")){((void(*)(unsigned,float))symbol)(A(0),rt_rf32(G_MEM,c->esp+8));STDCALL(0,2);}
