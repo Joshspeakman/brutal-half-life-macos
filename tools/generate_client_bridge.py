@@ -26,7 +26,7 @@ def scalar_body(returns, arguments, callee):
     if returns=='void':return call+';RET(0);'
     if returns in ('int','unsigned int','unsigned short','short','qboolean','HSPRITE'):return 'RET('+call+');'
     if returns in ('float','double'):return 'FPUSH('+call+');RET(0);'
-    if returns in ('char *','const char *'):return 'RET(copy_string('+call+'));'
+    if returns in ('char *','const char *'):return 'RET(borrowed_string('+call+'));'
     if returns=='particle_t *':return 'RET(particle_guest('+call+'));'
     if returns=='BEAM *':return 'RET(beam_guest('+call+'));'
     return None
@@ -181,7 +181,7 @@ def main():
             if returns == 'void': statement = call + ';RET(0);'
             elif returns in ('int','unsigned int','unsigned short','qboolean','HSPRITE'): statement = 'RET('+call+');'
             elif returns in ('float','double'): statement = 'FPUSH('+call+');RET(0);'
-            elif returns in ('char *','const char *'): statement = 'RET(copy_string('+call+'));'
+            elif returns in ('char *','const char *'): statement = 'RET(borrowed_string('+call+'));'
             else: continue
             scalars.append((e['name'],f'case BHL_CL_{e["name"]}: {statement}\n'))
     # These pinned engine calls read scalar state, do math, or draw 2D pixels.

@@ -30,6 +30,7 @@ def main():
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--valve',type=Path,required=True)
     ap.add_argument('--archive',type=Path,required=True)
+    ap.add_argument('--session',type=Path,default=ROOT/'work/session')
     ap.add_argument('--assets-only',action='store_true')
     ap.add_argument('--client',action='store_true',help='Also stage the development client and full engine')
     args=ap.parse_args()
@@ -37,7 +38,8 @@ def main():
         if not (args.valve/name).is_file():raise RuntimeError(f'Missing Half-Life data: {name}')
     if hashlib.sha256(args.archive.read_bytes()).hexdigest()!=ARCHIVE_SHA256:
         raise RuntimeError('Archive does not match the original BHL v3 release')
-    out=ROOT/'work/session'
+    out=args.session.resolve()
+    if not out.is_relative_to(ROOT/'work'):ap.error('Session must be inside ignored work/')
     out.mkdir(parents=True,exist_ok=True)
     session_lock=(out/'.session.lock').open('a')
     fcntl.flock(session_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -92,7 +94,7 @@ gamemode "singleplayer_only"
             for source,target in [('game_launch/xash3d','xash3d'),('engine/libxash.dylib','libxash.dylib'),('3rdparty/mainui/libmenu.dylib','libmenu.dylib'),('ref/gl/libref_gl.dylib','libref_gl.dylib'),('ref/soft/libref_soft.dylib','libref_soft.dylib'),('ref/null/libref_null.dylib','libref_null.dylib')]:
                 stage_binary(full/source,out/target)
             stage_binary(ROOT/'work/bridge/client_arm64.dylib',out/'bhl/cl_dlls/client_arm64.dylib')
-    print('Isolated session prepared under work/session; installed games and saves unchanged')
+    print(f'Isolated session prepared under {out.relative_to(ROOT)}; installed games and saves unchanged')
 
 
 if __name__=='__main__':main()

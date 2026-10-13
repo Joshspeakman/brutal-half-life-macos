@@ -85,7 +85,10 @@ static void studio_dispatch(Ctx *c,unsigned slot)
     studio_sync(1,slot==BHL_STUDIO_StudioClientEvents);if(getenv("BHL_BRIDGE_TRACE"))fprintf(stderr,"studio %s\n",studio_names[slot]);
     switch(slot){
     case BHL_STUDIO_Mem_Calloc:{uint64_t size=(uint64_t)A(0)*A(1);if(size>UINT32_MAX)STUDIO_RET(0);STUDIO_RET(bhl_heap_alloc(size,1));}
-    case BHL_STUDIO_Cache_Check:{StudioCache *p=studio_cache(A(0));void *h=studio.Cache_Check(&p->host);if(!h){rt_w32(G_MEM,A(0),0);STUDIO_RET(0);}STUDIO_RET(rt_r32(G_MEM,A(0)));}
+    case BHL_STUDIO_Cache_Check:{StudioCache *p=studio_cache(A(0));void *h=studio.Cache_Check(&p->host);if(!h){rt_w32(G_MEM,A(0),0);STUDIO_RET(0);}
+        /* A surviving native cache may outlive a video reset that discarded
+           its guest copy. Refresh the guest handle before returning it. */
+        uint32_t size;memcpy(&size,(char*)h+72,4);uint32_t guest=model_bytes(h,size);rt_w32(G_MEM,A(0),guest);STUDIO_RET(guest);}
     case BHL_STUDIO_LoadCacheFile:{
         StudioCache *p=studio_cache(A(1));studio.LoadCacheFile(gs(A(0)),&p->host);void *h=p->host.data;
         if(!h){rt_w32(G_MEM,A(1),0);STUDIO_RET(0);}uint32_t magic,size;memcpy(&magic,h,4);memcpy(&size,(char*)h+72,4);

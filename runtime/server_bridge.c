@@ -41,6 +41,7 @@ static uint32_t *private_data;
 static unsigned edict_capacity;
 typedef struct EntitySnapshot {int valid;entvars_t host;BhlEntvars guest;} EntitySnapshot;
 static EntitySnapshot *entity_snapshots;
+static int packet_snapshot_valid,packet_readonly_call;
 #include "v3_lifetime.inc"
 #define STRING_CAPACITY (4*1024*1024u)
 typedef struct StringEntry { uint32_t offset; struct StringEntry *next; } StringEntry;
@@ -175,6 +176,7 @@ static uint32_t copy_string(const char *s)
     if(!s)return 0;size_t n=strlen(s)+1;uint32_t p=bhl_heap_alloc((uint32_t)n,0);
     if(!p)abort();memcpy(G_MEM+p,s,n);return p;
 }
+#include "borrowed_strings.inc"
 #include "save_bridge.inc"
 typedef struct InfoBuffer {char *host;uint32_t guest;unsigned capacity;struct InfoBuffer *next;} InfoBuffer;
 static InfoBuffer *info_buffers;
@@ -195,7 +197,7 @@ static void sync_cvar(CvarBridge *v)
 {
     uint32_t p=v->guest;const char *s=v->host->string?v->host->string:"";
     uint32_t old=rt_r32(G_MEM,p+4);
-    if(!old||strcmp(gs(old),s))rt_w32(G_MEM,p+4,copy_string(s));
+    if(!old||strcmp(gs(old),s)){bhl_heap_free(old);rt_w32(G_MEM,p+4,copy_string(s));}
     rt_w32(G_MEM,p+8,v->host->flags);rt_wf32(G_MEM,p+12,v->host->value);
 }
 static uint32_t marshal_cvar(cvar_t *host,uint32_t preferred)
@@ -235,6 +237,7 @@ static void push_globals(void)
 }
 static uint32_t server_call(unsigned slot,const uint32_t *args,unsigned n)
 {
+    packet_snapshot_valid=0;
     sync_basic_globals();pull_info();
     uint32_t result=bhl_invoke(rt_r32(G_MEM,guest_api+4*slot),args,n,0);
     push_entities();push_globals();push_info();return result;
@@ -297,30 +300,35 @@ static void engine_dispatch(Ctx *c,unsigned slot)
     case BHL_ENG_pfnRandomLong:RAW_RET(engine.pfnRandomLong((int32_t)A(0),(int32_t)A(1)));
     case BHL_ENG_pfnRandomFloat:FPUSH(engine.pfnRandomFloat(rt_rf32(G_MEM,c->esp+4),rt_rf32(G_MEM,c->esp+8)));RAW_RET(0);
     case BHL_ENG_pfnCVarGetFloat:FPUSH(engine.pfnCVarGetFloat(gs(A(0))));RAW_RET(0);
-    case BHL_ENG_pfnCVarGetString:RAW_RET(copy_string(engine.pfnCVarGetString(gs(A(0)))));
+    case BHL_ENG_pfnCVarGetString:RAW_RET(borrowed_string(engine.pfnCVarGetString(gs(A(0)))));
     case BHL_ENG_pfnIsDedicatedServer:RAW_RET(engine.pfnIsDedicatedServer());
     case BHL_ENG_pfnCRC32_Init:engine.pfnCRC32_Init((CRC32_t*)gs(A(0)));RAW_RET(0);
     case BHL_ENG_pfnCRC32_ProcessBuffer:engine.pfnCRC32_ProcessBuffer((CRC32_t*)gs(A(0)),gs(A(1)),A(2));RAW_RET(0);
     case BHL_ENG_pfnCRC32_ProcessByte:engine.pfnCRC32_ProcessByte((CRC32_t*)gs(A(0)),A(1));RAW_RET(0);
     case BHL_ENG_pfnCRC32_Final:RAW_RET(engine.pfnCRC32_Final(A(0)));
+    case BHL_ENG_pfnSetGroupMask:engine.pfnSetGroupMask(A(0),A(1));RAW_RET(0);
+    case BHL_ENG_pfnCheckVisibility:
+        if(packet_readonly_call)RAW_RET(engine.pfnCheckVisibility(host_edict(A(0)),(byte*)gs(A(1))));
+        break;
     default:break;
     }
-    push_entities();push_globals();push_info();
+    packet_snapshot_valid=0;push_entities();push_globals();push_info();
     switch(slot){
+    case BHL_ENG_pfnCheckVisibility:RET(engine.pfnCheckVisibility(host_edict(A(0)),(byte*)gs(A(1))));
     case BHL_ENG_pfnFunctionFromName:RET(save_function_address(gs(A(0))));
     case BHL_ENG_pfnNameForFunction:RET(save_function_name(A(0)));
     case BHL_ENG_pfnCRC32_Init:engine.pfnCRC32_Init((CRC32_t*)gs(A(0)));RET(0);
     case BHL_ENG_pfnCRC32_ProcessBuffer:engine.pfnCRC32_ProcessBuffer((CRC32_t*)gs(A(0)),gs(A(1)),A(2));RET(0);
     case BHL_ENG_pfnCRC32_ProcessByte:engine.pfnCRC32_ProcessByte((CRC32_t*)gs(A(0)),A(1));RET(0);
     case BHL_ENG_pfnCRC32_Final:RET(engine.pfnCRC32_Final(A(0)));
-    case BHL_ENG_pfnCheckParm:{char *next=NULL;int r=engine.pfnCheckParm(gs(A(0)),A(1)?&next:NULL);if(A(1))rt_w32(G_MEM,A(1),copy_string(next));RET(r);}
+    case BHL_ENG_pfnCheckParm:{char *next=NULL;int r=engine.pfnCheckParm(gs(A(0)),A(1)?&next:NULL);if(A(1))rt_w32(G_MEM,A(1),borrowed_string(next));RET(r);}
     case BHL_ENG_pfnCvar_DirectSet:{CvarBridge *v=cvars;while(v&&v->guest!=A(0))v=v->next;if(!v)bridge_missing("engine",slot);engine.pfnCvar_DirectSet(v->host,gs(A(1)));RET(0);}
     case BHL_ENG_pfnSetFatPVS:case BHL_ENG_pfnSetFatPAS:{
         unsigned i=slot==BHL_ENG_pfnSetFatPAS;byte *mask=i?engine.pfnSetFatPAS((float*)gs(A(0))):engine.pfnSetFatPVS((float*)gs(A(0)));if(!mask)RET(0);
         const unsigned bytes=(MAX_MAP_LEAFS+7)/8; /* Pinned engine owns static arrays of exactly this size. */
         if(!visibility_buffers[i])visibility_buffers[i]=bhl_heap_alloc(bytes,1);memcpy(G_MEM+visibility_buffers[i],mask,bytes);RET(visibility_buffers[i]);
     }
-    case BHL_ENG_pfnGetInfoKeyBuffer:{edict_t *e=host_edict(A(0));char *p=engine.pfnGetInfoKeyBuffer(e);unsigned cap=!e?32768:e==edict_base?512:256;if(e&&e!=edict_base&&e-edict_base>host_globals->maxClients)RET(copy_string(p));RET(info_copy(p,cap));}
+    case BHL_ENG_pfnGetInfoKeyBuffer:{edict_t *e=host_edict(A(0));char *p=engine.pfnGetInfoKeyBuffer(e);unsigned cap=!e?32768:e==edict_base?512:256;if(e&&e!=edict_base&&e-edict_base>host_globals->maxClients)RET(borrowed_string(p));RET(info_copy(p,cap));}
     case BHL_ENG_pfnSetKeyValue:engine.pfnSetKeyValue(info_host(A(0)),gs(A(1)),gs(A(2)));pull_info();RET(0);
     case BHL_ENG_pfnSetClientKeyValue:engine.pfnSetClientKeyValue(A(0),info_host(A(1)),gs(A(2)),gs(A(3)));pull_info();RET(0);
     case BHL_ENG_pfnInfo_RemoveKey:engine.pfnInfo_RemoveKey(info_host(A(0)),gs(A(1)));pull_info();RET(0);
@@ -369,7 +377,7 @@ static void engine_dispatch(Ctx *c,unsigned slot)
     }
     case BHL_ENG_pfnCVarGetPointer:RET(marshal_cvar(engine.pfnCVarGetPointer(gs(A(0))),0));
     case BHL_ENG_pfnCVarGetFloat:FPUSH(engine.pfnCVarGetFloat(gs(A(0))));RET(0);
-    case BHL_ENG_pfnCVarGetString:RET(copy_string(engine.pfnCVarGetString(gs(A(0)))));
+    case BHL_ENG_pfnCVarGetString:RET(borrowed_string(engine.pfnCVarGetString(gs(A(0)))));
     case BHL_ENG_pfnCVarSetFloat:engine.pfnCVarSetFloat(gs(A(0)),rt_rf32(G_MEM,c->esp+8));RET(0);
     case BHL_ENG_pfnCVarSetString:engine.pfnCVarSetString(gs(A(0)),gs(A(1)));RET(0);
     case BHL_ENG_pfnAddServerCommand:
@@ -380,8 +388,8 @@ static void engine_dispatch(Ctx *c,unsigned slot)
     case BHL_ENG_pfnServerPrint:engine.pfnServerPrint(gs(A(0)));RET(0);
     case BHL_ENG_pfnGetGameDir:engine.pfnGetGameDir(gs(A(0)));RET(0);
     case BHL_ENG_pfnCmd_Argc:RET(engine.pfnCmd_Argc());
-    case BHL_ENG_pfnCmd_Argv:RET(copy_string(engine.pfnCmd_Argv(A(0))));
-    case BHL_ENG_pfnCmd_Args:RET(copy_string(engine.pfnCmd_Args()));
+    case BHL_ENG_pfnCmd_Argv:RET(borrowed_string(engine.pfnCmd_Argv(A(0))));
+    case BHL_ENG_pfnCmd_Args:RET(borrowed_string(engine.pfnCmd_Args()));
     case BHL_ENG_pfnIsDedicatedServer:RET(engine.pfnIsDedicatedServer());
     case BHL_ENG_pfnRandomLong:RET(engine.pfnRandomLong((int32_t)A(0),(int32_t)A(1)));
     case BHL_ENG_pfnRandomFloat:FPUSH(engine.pfnRandomFloat(rt_rf32(G_MEM,c->esp+4),rt_rf32(G_MEM,c->esp+8)));RET(0);
@@ -490,15 +498,24 @@ static void setup_visibility(edict_t *view,edict_t *client,byte **pvs,byte **pas
 {
     uint32_t p=bhl_heap_alloc(8,1),args[]={guest_edict(view),guest_edict(client),p,p+4};server_call(BHL_DLL_pfnSetupVisibility,args,4);
     uint32_t v=rt_r32(G_MEM,p),a=rt_r32(G_MEM,p+4);*pvs=v?G_MEM+v:NULL;*pas=a?G_MEM+a:NULL;bhl_heap_free(p);
+    packet_snapshot_valid=1;
 }
 static int add_full_pack(entity_state_t *state,int index,edict_t *entity,edict_t *host,int flags,int player,byte *set)
 {
     uint32_t mask=0;
     if(set){uintptr_t address=(uintptr_t)set-(uintptr_t)G_MEM;if(address>UINT32_MAX){fprintf(stderr,"BHL native bridge: unrecognized visibility buffer\n");abort();}mask=address;}
     uint32_t p=bhl_heap_alloc(sizeof *state,0),args[]={p,index,guest_edict(entity),guest_edict(host),flags,player,mask};memcpy(G_MEM+p,state,sizeof *state);
-    int result=server_call(BHL_DLL_pfnAddToFullPack,args,7);memcpy(state,G_MEM+p,sizeof *state);bhl_heap_free(p);return result;
+    /* Pinned v3 AddToFullPack writes the output state and its own group-mask
+       globals only. Xash calls SetupVisibility once before this read-only
+       packet loop. Reuse that world snapshot instead of copying every entity
+       again for every output entity (quadratic work). Other server callbacks
+       and non-query engine calls invalidate the snapshot. */
+    int result;
+    if(packet_snapshot_valid){packet_readonly_call=1;result=bhl_invoke(rt_r32(G_MEM,guest_api+4*BHL_DLL_pfnAddToFullPack),args,7,0);packet_readonly_call=0;}
+    else result=server_call(BHL_DLL_pfnAddToFullPack,args,7);
+    memcpy(state,G_MEM+p,sizeof *state);bhl_heap_free(p);return result;
 }
-static void server_deactivate(void){server_call(BHL_DLL_pfnServerDeactivate,NULL,0);model_invalidate();}
+static void server_deactivate(void){server_call(BHL_DLL_pfnServerDeactivate,NULL,0);model_reset();}
 static unsigned frame_count;
 static void server_activate(edict_t *list,int count,int clients)
 {

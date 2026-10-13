@@ -59,7 +59,7 @@ static void pm_dispatch(Ctx *c,unsigned slot)
     if(getenv("BHL_BRIDGE_TRACE"))fprintf(stderr,"movement %s\n",pm_names[slot]);
     if(guest_pmove)movement_push();
     switch(slot){
-    case BHL_PM_PM_Info_ValueForKey:PM_RET(copy_string(host_pmove->PM_Info_ValueForKey(gs(A(0)),gs(A(1)))));
+    case BHL_PM_PM_Info_ValueForKey:PM_RET(borrowed_string(host_pmove->PM_Info_ValueForKey(gs(A(0)),gs(A(1)))));
     case BHL_PM_Con_Printf:case BHL_PM_Con_DPrintf:{char text[8192];format_guest(text,gs(A(0)),c->esp+8);if(slot==BHL_PM_Con_Printf)host_pmove->Con_Printf("%s",text);else host_pmove->Con_DPrintf("%s",text);PM_RET(0);}
     case BHL_PM_Con_NPrintf:{char text[8192];format_guest(text,gs(A(1)),c->esp+12);host_pmove->Con_NPrintf(A(0),"%s",text);PM_RET(0);}
     case BHL_PM_Sys_FloatTime:FPUSH(host_pmove->Sys_FloatTime());PM_RET(0);
@@ -91,7 +91,7 @@ static void pm_dispatch(Ctx *c,unsigned slot)
         static uint32_t trace;if(!result)PM_RET(0);if(!trace)trace=bhl_heap_alloc(sizeof *result,1);memcpy(G_MEM+trace,result,sizeof *result);PM_RET(trace);
     }
     case BHL_PM_PM_PlaySound:host_pmove->PM_PlaySound(A(0),gs(A(1)),rt_rf32(G_MEM,c->esp+12),rt_rf32(G_MEM,c->esp+16),A(4),A(5));PM_RET(0);
-    case BHL_PM_PM_TraceTexture:PM_RET(copy_string(host_pmove->PM_TraceTexture(A(0),(float*)gs(A(1)),(float*)gs(A(2)))));
+    case BHL_PM_PM_TraceTexture:PM_RET(borrowed_string(host_pmove->PM_TraceTexture(A(0),(float*)gs(A(1)),(float*)gs(A(2)))));
     case BHL_PM_PM_PlaybackEventFull:host_pmove->PM_PlaybackEventFull(A(0),A(1),A(2),rt_rf32(G_MEM,c->esp+16),(float*)gs(A(4)),(float*)gs(A(5)),rt_rf32(G_MEM,c->esp+28),rt_rf32(G_MEM,c->esp+32),A(8),A(9),A(10),A(11));PM_RET(0);
     case BHL_PM_COM_FileSize:PM_RET(host_pmove->COM_FileSize(gs(A(0))));
     case BHL_PM_COM_LoadFile:{int size=0;byte *file=host_pmove->COM_LoadFile(gs(A(0)),A(1),&size);if(A(2))rt_w32(G_MEM,A(2),size);if(!file)PM_RET(0);if(size<0)abort();uint32_t p=bhl_heap_alloc(size+1,1);memcpy(G_MEM+p,file,size);host_pmove->COM_FreeFile(file);PM_RET(p);}

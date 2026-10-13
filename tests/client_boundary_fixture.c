@@ -69,6 +69,19 @@ int main(void)
     char text[]="first";model.entities=text;uint32_t mg=model_guest(&model);BhlModel *gm=(void*)(G_MEM+mg);assert(!strcmp(gs(gm->entities),"first"));
     memcpy(text,"later",6);model_invalidate();assert(model_guest(&model)==mg&&!strcmp(gs(gm->entities),"later"));
     model.numframes=9;assert(model_guest(&model)==mg&&gm->numframes==9);
+    uint32_t token=model_opaque(text,"fixture"),borrowed=borrowed_string("repeated-query");
+    uint32_t before=bhl_heap_used();
+    for(unsigned i=0;i<10000;i++)assert(borrowed_string("repeated-query")==borrowed);
+    assert(bhl_heap_used()==before);
+    /* Retiring a level frees large data copies, retains descriptor identity,
+       and reuses opaque slots instead of exhausting the thunk table. */
+    unsigned char *large=calloc(1,1024*1024);large[0]=123;
+    for(unsigned i=0;i<160;i++){
+        model_reset();uint32_t blob=model_bytes(large,1024*1024);
+        assert(G_MEM[blob]==123&&model_guest(&model)==mg);
+        assert(model_opaque(text,"fixture")==token);
+    }
+    assert(bhl_heap_used()-before<2*1024*1024);model_reset();free(large);
     dlight_t light={0};light.key=14;uint32_t dl=light_guest(&light);dlight_t *gl=(void*)(G_MEM+dl);gl->radius=100;gl->color.r=239;effects_push();assert(light.radius==100&&light.color.r==239);
     light.radius=75;effects_pull();assert(gl->radius==75);memset(&light,0,sizeof light);light.key=29;assert(light_guest(&light)==dl&&gl->key==29&&gl->radius==0);
     particle_t particle[2]={0};particle[0].next=particle+1;particle[0].think=native_particle_think;

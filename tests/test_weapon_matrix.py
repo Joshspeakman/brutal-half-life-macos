@@ -18,6 +18,7 @@ def main():
     ap.add_argument('--weapons',nargs='+',help='Default: all original exported weapon classes')
     ap.add_argument('--batch-size',type=int,default=3)
     ap.add_argument('--seconds-per-weapon',type=int,default=45)
+    ap.add_argument('--soak',action='store_true',help='Use longer draw/fire/reload intervals')
     args=ap.parse_args()
     if not 1<=args.batch_size<=8:ap.error('Batch size must be 1 through 8')
     pe=pefile.PE(str(ROOT/'work/images/hl.dll'))
@@ -32,6 +33,7 @@ def main():
         batch=selected[start:start+args.batch_size];key='-'.join(w.removeprefix('weapon_') for w in batch)
         print(f'Weapon batch: {", ".join(batch)}',flush=True);began=time.monotonic()
         command=[sys.executable,str(ROOT/'tests/test_client_engine.py'),'--renderer','gl','--video-driver','cocoa','--map','_zoo','--save-load','--capture-frames','25','--seconds',str(45+args.seconds_per_weapon*len(batch)),'--weapons',*batch]
+        if args.soak:command.append('--weapon-soak')
         with (out/(key+'.console.log')).open('w') as stream:
             result=subprocess.run(command,cwd=ROOT,stdout=stream,stderr=subprocess.STDOUT)
         source=ROOT/'work/reports/client-engine.json';record=json.loads(source.read_text());record['wall_seconds']=round(time.monotonic()-began,2)

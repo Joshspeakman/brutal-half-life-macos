@@ -8,6 +8,32 @@ static int string_alloc(const char *text)
 static edict_t *entity_at(int index){assert(index>=0&&index<16);return fixture_edicts+index;}
 static edict_t *find_sphere(edict_t *start,const float *origin,float radius)
 {assert(!start&&origin[0]==5&&radius==12);assert(fixture_edicts[1].v.absmin[0]==-9&&fixture_edicts[1].v.absmax[0]==19);assert(fixture_edicts[1].v.health==0);return fixture_edicts+1;}
+static int fixture_visible=1,fixture_group;
+static int packet_visibility(const edict_t *entity,byte *set){assert(entity==fixture_edicts+2);return fixture_visible;}
+static void packet_group(int mask,int operation){assert(operation==0);fixture_group=mask;}
+static int packet_index(const edict_t *entity){return entity-fixture_edicts;}
+static int packet_model(const char *name){return *name?17:0;}
+static void packet_snapshot_equivalence(void)
+{
+    engine.pfnCheckVisibility=packet_visibility;engine.pfnSetGroupMask=packet_group;
+    engine.pfnIndexOfEdict=packet_index;engine.pfnModelIndex=packet_model;
+    edict_t *entity=fixture_edicts+2,*host=fixture_edicts+1;
+    entity->free=0;entity->v.pContainingEntity=entity;entity->v.model=string_alloc("models/fixture.mdl");entity->v.modelindex=7;
+    entity->v.origin[1]=24;entity->v.angles[2]=17;entity->v.frame=3.25f;entity->v.owner=host;
+    for(unsigned scenario=0;scenario<5;scenario++){
+        fixture_visible=scenario!=1;entity->v.effects=scenario==2?EF_NODRAW:0;
+        entity->v.groupinfo=host->v.groupinfo=scenario==3?4:0;
+        entity_state_t full={0},packet={0};packet_snapshot_valid=0;
+        int expected=add_full_pack(&full,2,entity,host,0,scenario==4,NULL);
+        sync_basic_globals();packet_snapshot_valid=1;
+        int actual=add_full_pack(&packet,2,entity,host,0,scenario==4,NULL);
+        assert(actual==expected&&!memcmp(&full,&packet,sizeof full)&&fixture_group==0);
+        assert(actual==(scenario!=1&&scenario!=2));
+        if(actual)assert(packet.modelindex==7&&packet.origin[1]==24&&packet.frame==3.25f);
+    }
+    packet_snapshot_valid=0;entity->free=1;host->v.groupinfo=0;
+    puts("Original packet callback equivalence passed: visible, culled, hidden, grouped and player states");
+}
 static void save_roundtrip(void)
 {
     typedef struct {char title[13];int string_id;edict_t *target;float position[3],time;int counts[3];short number;} Record;
@@ -87,6 +113,7 @@ int main(void)
     int original=fixture_edicts[1].v.classname;strcpy(fixture_strings+original,"crayer");
     sync_basic_globals();assert(!strcmp(gs(guest_strings+g->v.classname),"crayer"));
     save_roundtrip();
+    packet_snapshot_equivalence();
     edict_t replacement[16]={0};uint32_t identity=guest_edict(fixture_edicts+1);
     fixture_edicts=replacement;globals.maxEntities=16;fixture_edicts[1].v.origin[2]=321;
     sync_basic_globals();assert(guest_edict(fixture_edicts+1)==identity&&host_edict(identity)==fixture_edicts+1&&g->v.origin[2]==321);

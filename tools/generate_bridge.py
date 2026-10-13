@@ -146,7 +146,7 @@ _Static_assert(offsetof(BhlEdict,v)==128,"guest edict entvars offset");
         if ret=='void':statement=call+';RET(0);'
         elif ret in ('int','unsigned int','unsigned short','qboolean'):statement='RET('+call+');'
         elif ret=='float':statement='FPUSH('+call+');RET(0);'
-        elif ret in ('const char *','char *'):statement='RET(copy_string('+call+'));'
+        elif ret in ('const char *','char *'):statement='RET(borrowed_string('+call+'));'
         elif ret=='edict_t *':statement='RET(guest_edict('+call+'));'
         else:continue
         automatic.append(f'case BHL_ENG_{name}: {statement}\n');bridged.append(name)

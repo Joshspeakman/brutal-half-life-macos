@@ -81,6 +81,28 @@ class Services(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'uninitialized critical section'):
             self.api('EnterCriticalSection', lock)
 
+    def test_heap_splits_large_recycled_blocks_and_coalesces(self):
+        # Formerly each 16-byte persistent result consumed a whole 64 KiB
+        # temporary buffer, exhausting 128 MiB after about 2,000 iterations.
+        before = self.n.lib.bhl_heap_used()
+        retained = []
+        for i in range(4096):
+            temporary = self.n.alloc(65536)
+            self.n.write(temporary, b'live')
+            self.assertEqual(self.n.lib.bhl_heap_free(temporary), 1)
+            retained.append(self.n.alloc(16))
+            self.n.write(retained[-1], struct.pack('<I', i))
+        self.assertLess(self.n.lib.bhl_heap_used()-before, 1024*1024)
+        for i, address in enumerate(retained):
+            self.assertEqual(self.words(address, 1), (i,))
+        # Alternating order joins spans on both sides of a freed allocation.
+        for address in retained[::2]+retained[1::2]:
+            self.assertEqual(self.n.lib.bhl_heap_free(address), 1)
+        before = self.n.lib.bhl_heap_used()
+        joined = self.n.alloc(65536)
+        self.assertEqual(self.n.lib.bhl_heap_used(), before)
+        self.assertEqual(self.n.lib.bhl_heap_free(joined), 1)
+
     def test_file_unicode_io_sharing_and_path_boundary(self):
         previous = os.getcwd()
         with tempfile.TemporaryDirectory(prefix='bhl-api-', dir=ROOT / 'work') as directory:

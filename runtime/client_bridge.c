@@ -52,6 +52,7 @@ static uint32_t copy_bytes(const void *data,size_t size)
     if(!data)return 0;if(size>0x10000000)abort();uint32_t p=bhl_heap_alloc((uint32_t)size,0);if(!p)abort();memcpy(G_MEM+p,data,size);return p;
 }
 static uint32_t copy_string(const char *text){return text?copy_bytes(text,strlen(text)+1):0;}
+#include "borrowed_strings.inc"
 static void sync_cvars(void);
 static uint32_t invoke_address(uint32_t fn,const uint32_t *args,unsigned count)
 {client_call_depth++;sync_cvars();entities_pull();uint32_t result=bhl_invoke(fn,args,count,0);entities_push();if(!--client_call_depth)entities_end();return result;}
@@ -250,7 +251,7 @@ static void client_dispatch(Ctx *c,unsigned slot)
         RET(engine.pfnHookUserMsg(gs(A(0)),messages[i]));}
     case BHL_CL_pfnHookEvent:{unsigned i=event_count++;if(i>=128)abort();event_guest[i]=A(1);event_names[i]=strdup(gs(A(0)));engine.pfnHookEvent(gs(A(0)),events[i]);RET(0);}
     case BHL_CL_COM_ExpandFilename:RET(engine.COM_ExpandFilename(gs(A(0)),gs(A(1)),A(2)));
-    case BHL_CL_CheckParm:{char *next=NULL;int result=engine.CheckParm(gs(A(0)),A(1)?&next:NULL);if(A(1))rt_w32(G_MEM,A(1),copy_string(next));RET(result);}
+    case BHL_CL_CheckParm:{char *next=NULL;int result=engine.CheckParm(gs(A(0)),A(1)?&next:NULL);if(A(1))rt_w32(G_MEM,A(1),borrowed_string(next));RET(result);}
     case BHL_CL_COM_LoadFile:{
         int size=0;byte *data=engine.COM_LoadFile(gs(A(0)),A(1),&size);if(A(2))rt_w32(G_MEM,A(2),size);if(!data)RET(0);
         if(size<0)abort();uint32_t p=bhl_heap_alloc((uint32_t)size+1,1);if(!p)abort();memcpy(G_MEM+p,data,size);engine.COM_FreeFile(data);RET(p);
@@ -293,7 +294,7 @@ EXPORT int Initialize(cl_enginefunc_t *functions,int version)
     fprintf(stderr,"BHL v3 client Initialize returned %d; registered %u events\n",result,event_count);return result;
 }
 EXPORT void HUD_Init(void){invoke("HUD_Init",NULL,0);fprintf(stderr,"BHL v3 HUD_Init completed\n");}
-EXPORT int HUD_VidInit(void){model_invalidate();return invoke("HUD_VidInit",NULL,0);}
+EXPORT int HUD_VidInit(void){model_reset();return invoke("HUD_VidInit",NULL,0);}
 EXPORT void HUD_Shutdown(void){invoke("HUD_Shutdown",NULL,0);}
 EXPORT void HUD_Reset(void){invoke("HUD_Reset",NULL,0);}
 EXPORT void IN_ActivateMouse(void){invoke("IN_ActivateMouse",NULL,0);}

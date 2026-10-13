@@ -3,6 +3,7 @@
  * Their tokens live in the unreadable thunk area: direct guest access faults
  * instead of silently reading an empty or truncated native structure. */
 #include "com_model.h"
+extern int bhl_heap_free(uint32_t);
 typedef struct BhlHull {uint32_t clipnodes,planes;int firstclipnode,lastclipnode;vec3_t clip_mins,clip_maxs;} BhlHull;
 typedef struct BhlModel {
     char name[64];int needload,type,numframes;uint32_t mempool;int flags;vec3_t mins,maxs;float radius;
@@ -21,11 +22,20 @@ typedef struct ModelMirror {const model_t *host;uint32_t guest,epoch;model_t sna
 static ModelMirror *model_mirrors;
 static uint32_t model_epoch=1;
 static void model_invalidate(void){if(!++model_epoch)abort();}
+/* Video/map initialization invalidates borrowed model storage. Descriptors
+ * keep their identity, but previous levels must not retain whole BSP/studio
+ * copies. Opaque token slots are reusable after this boundary. */
+static void model_reset(void)
+{
+    model_invalidate();ModelData **at=&model_data;
+    while(*at){ModelData *d=*at;if(d->size){*at=d->next;bhl_heap_free(d->guest);free(d);}else{d->host=NULL;at=&d->next;}}
+}
 static unsigned opaque_serial;
 static void model_fault(const char *what){fprintf(stderr,"BHL native model: unimplemented or invalid %s\n",what);abort();}
 static uint32_t model_opaque(const void *host,const char *type)
 {
     if(!host)return 0;for(ModelData *d=model_data;d;d=d->next)if(d->host==host&&!d->size)return d->guest;
+    for(ModelData *d=model_data;d;d=d->next)if(!d->host&&!d->size){d->host=host;return d->guest;}
     char name[128];snprintf(name,sizeof name,BHL_MODEL_NAMESPACE "opaque-%s-%u",type,opaque_serial++);
     ModelData *d=calloc(1,sizeof *d);if(!d)abort();d->host=host;d->guest=bhl_thunk(name,NULL);d->next=model_data;model_data=d;return d->guest;
 }
@@ -53,11 +63,13 @@ static uint32_t model_guest(const model_t *h)
        callbacks. Avoid re-walking every model array and entity text lump. */
     if(m->epoch==model_epoch&&!memcmp(&m->snapshot,h,sizeof *h))return m->guest;
     if(m->epoch==model_epoch&&strcmp(m->snapshot.name,h->name))model_invalidate();
+    int replaced=m->snapshot.mempool!=h->mempool||strcmp(m->snapshot.name,h->name);
     memcpy(&m->snapshot,h,sizeof *h);m->epoch=model_epoch;
     BhlModel *g=(void*)(G_MEM+m->guest);memcpy(g,h,124);
     /* The original client uses studio submodels as its own 16-entry cache
        array. Preserve that guest allocation separately from Xash's cache. */
     if(h->type!=mod_studio)g->submodels=model_opaque(h->submodels,"submodels");
+    else if(replaced)g->submodels=0;
     g->numplanes=h->numplanes;g->planes=model_bytes(h->planes,h->numplanes*sizeof *h->planes);
     g->numleafs=h->numleafs;g->leafs=model_opaque(h->leafs,"leafs");
     g->numvertexes=h->numvertexes;g->vertexes=model_bytes(h->vertexes,h->numvertexes*sizeof *h->vertexes);

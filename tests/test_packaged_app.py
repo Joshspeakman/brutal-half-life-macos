@@ -19,8 +19,8 @@ from native_harness import ROOT
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--app', type=Path, default=ROOT/'work/package/Brutal Half-Life.app')
-    ap.add_argument('--stages', nargs='+', choices=['menu', 'campaign', 'save', 'reload', 'transition'],
-                    default=['menu', 'campaign', 'save', 'reload', 'transition'])
+    ap.add_argument('--stages', nargs='+', choices=['menu', 'campaign', 'save', 'reload', 'transition', 'combat', 'movement', 'cycles'],
+                    default=['menu', 'campaign', 'save', 'reload', 'transition', 'combat', 'movement', 'cycles'])
     ap.add_argument('--seconds', type=int, default=180)
     args = ap.parse_args()
     app = args.app.resolve()
@@ -37,7 +37,11 @@ def main():
         'save': 'map _zoo\n'+wait*30+'sv_cheats 1\ngod\nimpulse 101\n'+wait*10+'save native-package\n'+wait*5+'echo BHL_PACKAGE_SAVE\nquit\n',
         'reload': 'load native-package\n'+wait*35+'echo BHL_PACKAGE_RELOAD\nquit\n',
         'transition': 'map c0a0\n'+wait*30+'changelevel c0a0a c0a0toa\n'+wait*35+'save native-transition\n'+wait*5+'load native-transition\n'+wait*30+'echo BHL_PACKAGE_TRANSITION\nquit\n',
+        'combat': 'map c2a2d\n'+wait*30+'sv_cheats 1\ngod\n'+wait*200+'save native-tank\n'+wait*5+'load native-tank\n'+wait*40+'echo BHL_PACKAGE_COMBAT\nquit\n',
+        'movement': 'map _zoo\n'+wait*35+'viewpos\n+forward\n'+wait*30+'-forward\n'+wait*3+'viewpos\n+jump\n'+wait*5+'-jump\nviewpos\n'+wait*40+'+duck\n'+wait*10+'viewpos\n-duck\n'+wait*10+'viewpos\n+use\n'+wait*3+'-use\necho BHL_PACKAGE_MOVEMENT\nquit\n',
     }
+    cycle_maps=['_zoo','start','c1a0','c1a1','c1a4','c2a2d','c2a3','c2a4','c3a1','c4a1','c4a3','c5a1','_zoo','start']
+    scripts['cycles']=''.join('map '+name+'\n'+wait*35+'echo BHL_CYCLE '+name+'\n' for name in cycle_maps)+'save native-cycles\n'+wait*5+'load native-cycles\n'+wait*35+'echo BHL_PACKAGE_CYCLES\nquit\n'
     config = data/'bhl/config.cfg'
     before = hashlib.sha256(config.read_bytes()).hexdigest()
     report = dict(app_build=json.loads((app/'Contents/Resources/Build.json').read_text()), stages={}, passed=False)
@@ -45,6 +49,8 @@ def main():
         name = 'native-package-'+stage+'.cfg'
         (data/'bhl'/name).write_text(scripts[stage])
         if stage == 'save': (data/'bhl/save/native-package.sav').unlink(missing_ok=True)
+        if stage == 'combat': (data/'bhl/save/native-tank.sav').unlink(missing_ok=True)
+        if stage == 'cycles': (data/'bhl/save/native-cycles.sav').unlink(missing_ok=True)
         capture = data/'bhl/scrshots/native-package-start.png'
         if stage == 'campaign': capture.unlink(missing_ok=True)
         log = out/(stage+'.launcher.log'); began = time.monotonic(); timeout = False
@@ -74,7 +80,26 @@ def main():
         if stage == 'save':
             saved = data/'bhl/save/native-package.sav'; checks['save_written'] = saved.exists() and saved.stat().st_size > 0
         if stage == 'transition': checks['three_map_activations'] = text.count('BHL v3 ServerActivate completed') >= 3
+        if stage == 'combat':
+            saved = data/'bhl/save/native-tank.sav'
+            checks.update(god_enabled='godmode ON' in text,
+                          expired_sprite_retired='BHL v3 retired an expired mounted-weapon sprite reference' in text,
+                          save_written=saved.exists() and saved.stat().st_size > 0,
+                          map_reloaded=text.count('BHL v3 ServerActivate completed') >= 2)
+        if stage == 'movement':
+            positions=[tuple(map(float,match)) for match in re.findall(r'org \( ([\d.eE+-]+) ([\d.eE+-]+) ([\d.eE+-]+) \)',text)]
+            checks['five_positions']=len(positions)==5
+            if len(positions)==5:
+                checks.update(walking=sum((positions[0][i]-positions[1][i])**2 for i in (0,1))>64,
+                              jumping=positions[2][2]>positions[1][2]+8,
+                              crouching=positions[4][2]>positions[3][2]+8)
+        if stage == 'cycles':
+            saved=data/'bhl/save/native-cycles.sav'
+            checks.update(all_maps_ran=len(re.findall(r'BHL_CYCLE ',text))==len(cycle_maps),
+                          all_maps_activated=text.count('BHL v3 ServerActivate completed')>=len(cycle_maps)+1,
+                          save_written=saved.exists() and saved.stat().st_size>0)
         report['stages'][stage] = dict(checks=checks, failures=failures, seconds=round(time.monotonic()-began, 2), passed=all(checks.values()))
+        if stage == 'movement':report['stages'][stage]['view_positions']=positions
         report['passed'] = all(r['passed'] for r in report['stages'].values()) and stage == args.stages[-1]
         (out/'acceptance.json').write_text(json.dumps(report, indent=2)+'\n')
         print(stage, json.dumps(report['stages'][stage]), flush=True)

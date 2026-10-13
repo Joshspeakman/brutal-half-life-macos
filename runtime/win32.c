@@ -32,8 +32,13 @@ extern uint8_t *rt_test_mem(void);
 extern int rt_cpuid_sse2;
 static int deterministic, trace_enabled;
 static uint32_t heap_next = BHL_HEAP_BASE;
-typedef struct Block { uint32_t address, size, capacity, heap; int used; struct Block *next; } Block;
-static _Atomic(Block *) blocks;
+/* Physical neighbors allow coalescing; free bins and a live-address index keep
+ * per-frame allocation independent of the number of model/entity mirrors. */
+typedef struct Block {
+    uint32_t address, size, capacity, heap; int used;
+    struct Block *next, *prev, *free_next, *free_prev, *hash_next;
+} Block;
+static Block *blocks, *last_block, *free_bins[32], *live_blocks[4096];
 static pthread_mutex_t heap_lock = PTHREAD_MUTEX_INITIALIZER;
 static __thread uint32_t last_error, tls_values[1088];
 static __thread uint32_t tls_generations[1088];
@@ -81,39 +86,67 @@ static char *gs(uint32_t p){return p?(char*)G_MEM+p:NULL;}
 void bhl_set_deterministic(int enabled) { deterministic = enabled; }
 void bhl_set_trace(int enabled) { trace_enabled = enabled; }
 uint32_t bhl_heap_used(void) { return heap_next - BHL_HEAP_BASE; }
-static Block *block_at(uint32_t p) { for (Block *b = blocks; b; b = b->next) if (b->used && b->address == p) return b; return NULL; }
+static unsigned heap_bin(uint32_t size){return 31u-__builtin_clz(size);}
+static unsigned heap_hash(uint32_t address){return ((address>>4)*2654435761u)>>20;}
+static Block *block_at_locked(uint32_t p)
+{for(Block *b=live_blocks[heap_hash(p)];b;b=b->hash_next)if(b->address==p)return b;return NULL;}
+static Block *block_at(uint32_t p)
+{pthread_mutex_lock(&heap_lock);Block *b=block_at_locked(p);pthread_mutex_unlock(&heap_lock);return b;}
+static void free_remove(Block *b)
+{
+    if(b->free_prev)b->free_prev->free_next=b->free_next;else free_bins[heap_bin(b->capacity)]=b->free_next;
+    if(b->free_next)b->free_next->free_prev=b->free_prev;b->free_next=b->free_prev=NULL;
+}
+static void free_insert(Block *b)
+{
+    unsigned bin=heap_bin(b->capacity);b->free_next=free_bins[bin];b->free_prev=NULL;
+    if(b->free_next)b->free_next->free_prev=b;free_bins[bin]=b;
+}
 uint32_t bhl_heap_alloc(uint32_t bytes, int zero)
 {
-    uint64_t cap64 = ((uint64_t)bytes + 15) & ~15ull;
-    if (!cap64) cap64 = 16;
-    if (cap64 > BHL_HEAP_END - BHL_HEAP_BASE) { last_error = 8; return 0; }
-    uint32_t cap = (uint32_t)cap64;
-    pthread_mutex_lock(&heap_lock);
-    Block *b;
-    for (b = blocks; b; b = b->next) if (!b->used && b->capacity >= cap) break;
-    if (!b) {
-        if (cap > BHL_HEAP_END - heap_next || !(b = calloc(1, sizeof *b))) {
-            pthread_mutex_unlock(&heap_lock); last_error = 8; return 0;
-        }
-        b->address = heap_next; b->capacity = cap; heap_next += cap;
-        b->next = blocks; blocks = b;
+    uint64_t cap64=((uint64_t)bytes+15)&~15ull;if(!cap64)cap64=16;
+    if(cap64>BHL_HEAP_END-BHL_HEAP_BASE){last_error=8;return 0;}
+    uint32_t cap=(uint32_t)cap64;pthread_mutex_lock(&heap_lock);Block *b=NULL;
+    for(unsigned bin=heap_bin(cap);bin<32&&!b;bin++)
+        for(Block *candidate=free_bins[bin];candidate;candidate=candidate->free_next)
+            if(candidate->capacity>=cap&&(!b||candidate->capacity<b->capacity)){b=candidate;if(b->capacity==cap)break;}
+    if(b){
+        /* Never let a tiny request consume an entire freed model allocation. */
+        if(b->capacity>cap){
+            Block *tail=calloc(1,sizeof *tail);if(!tail)goto failed;
+            tail->address=b->address+cap;tail->capacity=b->capacity-cap;tail->prev=b;tail->next=b->next;
+            if(tail->next)tail->next->prev=tail;else last_block=tail;
+            free_remove(b);b->next=tail;b->capacity=cap;free_insert(tail);
+        }else free_remove(b);
+    }else{
+        if(cap>BHL_HEAP_END-heap_next||!(b=calloc(1,sizeof *b)))goto failed;
+        b->address=heap_next;b->capacity=cap;heap_next+=cap;b->prev=last_block;
+        if(last_block)last_block->next=b;else blocks=b;last_block=b;
     }
-    b->size = bytes; b->used = 1; b->heap=0x01000000;
-    if (zero) memset(G_MEM + b->address, 0, bytes);
-    uint32_t p = b->address;
-    pthread_mutex_unlock(&heap_lock);
-    return p;
+    b->size=bytes;b->used=1;b->heap=0x01000000;
+    unsigned hash=heap_hash(b->address);b->hash_next=live_blocks[hash];live_blocks[hash]=b;
+    if(zero)memset(G_MEM+b->address,0,bytes);uint32_t p=b->address;pthread_mutex_unlock(&heap_lock);return p;
+failed:
+    fprintf(stderr,"BHL heap exhausted: request=%u extent=%u\n",bytes,heap_next-BHL_HEAP_BASE);
+    pthread_mutex_unlock(&heap_lock);last_error=8;return 0;
+}
+/* Caller owns heap_lock. Returns the coalesced span's next physical block. */
+static Block *heap_release(Block *b)
+{
+    Block **at=&live_blocks[heap_hash(b->address)];while(*at!=b)at=&(*at)->hash_next;*at=b->hash_next;
+    b->used=0;b->size=0;
+    if(b->prev&&!b->prev->used){Block *previous=b->prev;free_remove(previous);previous->capacity+=b->capacity;previous->next=b->next;
+        if(b->next)b->next->prev=previous;else last_block=previous;free(b);b=previous;}
+    if(b->next&&!b->next->used){Block *next=b->next;free_remove(next);b->capacity+=next->capacity;b->next=next->next;
+        if(b->next)b->next->prev=b;else last_block=b;free(next);}
+    free_insert(b);return b->next;
 }
 static int heap_free(uint32_t p)
 {
-    if (!p) return 1;
-    pthread_mutex_lock(&heap_lock);
-    Block *b = block_at(p); if (b) b->used = 0;
-    pthread_mutex_unlock(&heap_lock);
-    if (!b) last_error = 87;
-    return b != NULL;
+    if(!p)return 1;pthread_mutex_lock(&heap_lock);Block *b=block_at_locked(p);int found=b!=NULL;
+    if(b)heap_release(b);pthread_mutex_unlock(&heap_lock);if(!found)last_error=87;return found;
 }
-int bhl_heap_free(uint32_t p) { return heap_free(p); }
+int bhl_heap_free(uint32_t p){return heap_free(p);}
 static Lock *lock_at(uint32_t p) { pthread_mutex_lock(&lock_registry);Lock *found=NULL;for (Lock *l = locks; l; l = l->next) if (l->address == p){found=l;break;}pthread_mutex_unlock(&lock_registry);return found; }
 static void missing(Ctx *c, const char *name)
 {
@@ -733,7 +766,9 @@ static void dispatch_import(Ctx *c, uint32_t index)
     }
     if (IS("HeapDestroy")) {
         uint32_t h=A(0);if(h<=0x01000000||h>=0x01000100||!heaps[h-0x01000000]){last_error=6;RETURN(0,1);}
-        for(Block *b=blocks;b;b=b->next)if(b->heap==h)b->used=0;heaps[h-0x01000000]=0;RETURN(1,1);
+        pthread_mutex_lock(&heap_lock);
+        for(Block *b=blocks;b;)if(b->used&&b->heap==h)b=heap_release(b);else b=b->next;
+        heaps[h-0x01000000]=0;pthread_mutex_unlock(&heap_lock);RETURN(1,1);
     }
     if (IS("GetVersionExA")) {
         uint32_t p=A(0),size=rt_r32(G_MEM,p);if(size!=148&&size!=156){last_error=87;RETURN(0,1);}
