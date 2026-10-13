@@ -83,6 +83,22 @@ Windows saves and quicksave/autosave remain unverified. The packaged app also
 passes a fresh-process showcase reload and a `c0a0` to `c0a0a` transition using
 the `c0a0toa` landmark, then saves and reloads the destination map.
 
+The October 13 RTCW crash investigation reproduced a fatal native string
+lookup while moving from `rtcw1` to `rtcw1a`. Xash's global-entity discovery
+passes uninitialized temporary entvars to `SaveReadFields`; the bridge had
+imported those output fields before the original reader populated them.
+Read destinations now start with a zeroed guest payload and are copied back
+only after reading. A poisoned-destination fixture fails before the fix and
+passes after it, including global strings, entity pointers, zero fields,
+time/landmark rebasing and an untouched field outside the schema.
+
+The debugger replay crossed the original failing in-map trigger successfully.
+The packaged RTCW check now covers global-entity merging, a destination save
+and reload, and the return transition. Transition scripts use Xash's
+`changelevel2` command: plain `changelevel` ignores a landmark argument and
+does not exercise the same adjacent-level restoration path. These are bounded
+regressions, not a completed campaign playthrough.
+
 Scripted `_zoo` batches request all 36 exported weapon class names, run
 primary/secondary attack and reload commands, request map music, then save,
 reload and quit. Original event handlers execute without

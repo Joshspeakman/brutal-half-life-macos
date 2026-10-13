@@ -20,8 +20,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--app', type=Path, default=ROOT/'work/package/Brutal Half-Life.app')
     ap.add_argument('--report-dir', type=Path, default=ROOT/'work/reports/packaged')
-    ap.add_argument('--stages', nargs='+', choices=['menu', 'campaign', 'save', 'reload', 'transition', 'combat', 'movement', 'cycles', 'display'],
-                    default=['menu', 'campaign', 'save', 'reload', 'transition', 'combat', 'movement', 'cycles', 'display'])
+    ap.add_argument('--stages', nargs='+', choices=['menu', 'campaign', 'save', 'reload', 'transition', 'rtcw', 'combat', 'movement', 'cycles', 'display'],
+                    default=['menu', 'campaign', 'save', 'reload', 'transition', 'rtcw', 'combat', 'movement', 'cycles', 'display'])
     ap.add_argument('--seconds', type=int, default=180)
     ap.add_argument('--visible', action='store_true', help='Show test windows to verify native fullscreen and OS Game Mode')
     ap.add_argument('--fullscreen', action='store_true', help='Exercise the launcher Fullscreen option')
@@ -44,7 +44,10 @@ def main():
         'campaign': 'map start\nscr_conspeed 100000\n'+wait*240+'snapshot scrshots/native-package-start.png\n'+wait*3+'echo BHL_PACKAGE_CAMPAIGN\nquit\n',
         'save': 'map _zoo\n'+wait*30+'sv_cheats 1\ngod\nimpulse 101\n'+wait*10+'save native-package\n'+wait*5+'echo BHL_PACKAGE_SAVE\nquit\n',
         'reload': 'load native-package\n'+wait*35+'echo BHL_PACKAGE_RELOAD\nquit\n',
-        'transition': 'map c0a0\n'+wait*30+'changelevel c0a0a c0a0toa\n'+wait*35+'save native-transition\n'+wait*5+'load native-transition\n'+wait*30+'echo BHL_PACKAGE_TRANSITION\nquit\n',
+        'transition': 'map c0a0\n'+wait*30+'changelevel2 c0a0a c0a0toa\n'+wait*35+'save native-transition\n'+wait*5+'load native-transition\n'+wait*30+'echo BHL_PACKAGE_TRANSITION\nquit\n',
+        'rtcw': 'map rtcw1\nwait 120\nsv_cheats 1\ngod\nimpulse 101\nwait 120\n'+
+                'changelevel2 rtcw1a w1tw1alm\nwait 180\nsave native-rtcw\nwait 10\nload native-rtcw\nwait 120\n'+
+                'changelevel2 rtcw1 w1tw1alm\nwait 180\necho BHL_PACKAGE_RTCW\nquit\n',
         'combat': 'map c2a2d\n'+wait*30+'sv_cheats 1\ngod\n'+wait*200+'save native-tank\n'+wait*5+'load native-tank\n'+wait*40+'echo BHL_PACKAGE_COMBAT\nquit\n',
         'movement': 'map _zoo\n'+wait*35+'viewpos\n+forward\n'+wait*30+'-forward\n'+wait*3+'viewpos\n+jump\n'+wait*5+'-jump\nviewpos\n'+wait*40+'+duck\n'+wait*10+'viewpos\n-duck\n'+wait*10+'viewpos\n+use\n'+wait*3+'-use\necho BHL_PACKAGE_MOVEMENT\nquit\n',
         'display': 'map c1a0\nscr_conspeed 100000\n'+wait*80+
@@ -62,6 +65,7 @@ def main():
         name = 'native-package-'+stage+'.cfg'
         (data/'bhl'/name).write_text(scripts[stage])
         if stage == 'save': (data/'bhl/save/native-package.sav').unlink(missing_ok=True)
+        if stage == 'rtcw': (data/'bhl/save/native-rtcw.sav').unlink(missing_ok=True)
         if stage == 'combat': (data/'bhl/save/native-tank.sav').unlink(missing_ok=True)
         if stage == 'cycles': (data/'bhl/save/native-cycles.sav').unlink(missing_ok=True)
         capture = data/'bhl/scrshots/native-package-start.png'
@@ -117,7 +121,13 @@ def main():
             checks.update(connected='client connected at' in text, frames='BHL v3 completed 10 server frames' in text)
         if stage == 'save':
             saved = data/'bhl/save/native-package.sav'; checks['save_written'] = saved.exists() and saved.stat().st_size > 0
-        if stage == 'transition': checks['three_map_activations'] = text.count('BHL v3 ServerActivate completed') >= 3
+        if stage == 'transition':
+            checks['three_map_activations'] = text.count('BHL v3 ServerActivate completed') >= 3
+            checks['landmark_transition'] = 'Spawn Server: c0a0a [c0a0toa]' in text
+        if stage == 'rtcw':
+            checks.update(global_entity_restore='Merging changes for global: func_breakable' in text,
+                          four_map_activations=text.count('BHL v3 ServerActivate completed') >= 4,
+                          save_written=(data/'bhl/save/native-rtcw.sav').exists())
         if stage == 'combat':
             saved = data/'bhl/save/native-tank.sav'
             checks.update(god_enabled='godmode ON' in text,

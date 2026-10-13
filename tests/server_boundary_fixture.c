@@ -77,9 +77,9 @@ static void packet_snapshot_equivalence(void)
 }
 static void save_roundtrip(void)
 {
-    typedef struct {char title[13];int string_id;edict_t *target;float position[3],time;int counts[3];short number;} Record;
+    typedef struct {char title[13];int string_id;edict_t *target;float position[3],time;int counts[3];short number;unsigned untouched;} Record;
     TYPEDESCRIPTION fields[]={
-        DEFINE_ARRAY(Record,title,FIELD_CHARACTER,13),DEFINE_FIELD(Record,string_id,FIELD_STRING),
+        DEFINE_ARRAY(Record,title,FIELD_CHARACTER,13),DEFINE_GLOBAL_FIELD(Record,string_id,FIELD_STRING),
         DEFINE_FIELD(Record,target,FIELD_EDICT),DEFINE_FIELD(Record,position,FIELD_POSITION_VECTOR),
         DEFINE_FIELD(Record,time,FIELD_TIME),DEFINE_ARRAY(Record,counts,FIELD_INTEGER,3),DEFINE_FIELD(Record,number,FIELD_SHORT),
     };
@@ -96,10 +96,14 @@ static void save_roundtrip(void)
     /* Token strings must remain live after temporary field descriptions are
        gone; source/native pointer width and padding must not enter the file. */
     unsigned populated=0;for(int i=0;i<s->tokenCount;i++)if(s->pTokens[i]){assert(strlen(s->pTokens[i])>0);populated++;}assert(populated>=8);
-    Record target={0};s->pCurrentData=s->pBaseData;s->size=0;s->time=200;s->vecLandmarkOffset[0]=20;
+    /* Xash's global-entity transition probe passes an uninitialized stack
+       destination. ReadFields must not dereference its old string IDs or
+       pointers, and fields outside the supplied schema must stay untouched. */
+    Record target;memset(&target,0xa5,sizeof target);s->pCurrentData=s->pBaseData;s->size=0;s->time=200;s->vecLandmarkOffset[0]=20;
     api.pfnSaveReadFields(s,"fixture-record",&target,fields,sizeof fields/sizeof *fields);
     assert(s->size==written&&!strcmp(source.title,target.title));assert(!strcmp(string_value(target.string_id),"retained-string"));
-    assert(target.target==fixture_edicts+1&&target.position[0]==37&&target.position[1]==3&&target.time==225);
+    assert(target.target==fixture_edicts+1&&target.position[0]==37&&target.position[1]==3&&target.position[2]==0&&target.time==225);
+    assert(target.untouched==0xa5a5a5a5u);
     assert(!memcmp(target.counts,source.counts,sizeof source.counts)&&target.number==source.number);
     assert(s->levelList[0].pentLandmark==fixture_edicts+1&&!strcmp(s->levelList[0].mapName,"save-fixture"));
     uint32_t function=bhl_export("hl.dll","?AccelerateThink@CApacheHVR@@AAEXXZ");assert(function);

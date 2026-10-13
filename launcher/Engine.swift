@@ -17,13 +17,16 @@ func runBundledEngine() -> Never {
     guard let entry = dlsym(engine, "Host_Main"), let shutdown = dlsym(engine, "Host_Shutdown") else {
         fputs("BHL native loader: missing engine entry points\n", stderr); exit(1)
     }
-    var arguments = ([CommandLine.arguments[0]] + CommandLine.arguments.dropFirst(2)).map { strdup($0) }
+    // Xash's signal handler cannot symbolize this Mach-O build and consumes
+    // fatal signals before macOS can create its native crash report.
+    var arguments = ([CommandLine.arguments[0], "-noch"] + CommandLine.arguments.dropFirst(2)).map { strdup($0) }
     arguments.append(nil)
     let count = Int32(arguments.count - 1)
     let fullscreenObserver = NotificationCenter.default.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: nil, queue: nil) { _ in
         fputs("BHL macOS native fullscreen entered\n", stderr)
     }
     fputs("BHL game app identity: \(Bundle.main.bundleIdentifier ?? "missing")\n", stderr)
+    fputs("BHL engine process: \(getpid())\n", stderr)
     let status = arguments.withUnsafeMutableBufferPointer { argv in
         "valve".withCString { game in
             unsafeBitCast(entry, to: HostMain.self)(count, argv.baseAddress, game, 0, nil)

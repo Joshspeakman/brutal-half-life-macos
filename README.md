@@ -55,6 +55,9 @@ settings, saves and `Last Run.log` are under
 `~/Library/Application Support/Brutal Half-Life`. `--app` and `--data-dir`
 override these locations. Repeating the command replaces only this project's
 app and preserves its existing user data. `--check` runs the development checks.
+Each launch archives the previous play log under `Play Logs`. Logs include the
+build, arguments, engine PID and exit status. Fatal signals use macOS crash
+reporting; reports are available in Console or `~/Library/Logs/DiagnosticReports`.
 The bundle carries its native runtime libraries, prepared image data, icon and
 menu artwork. It does not require Homebrew at launch. It is a local build from
 owned inputs, not an artifact to distribute.

@@ -529,7 +529,12 @@ static void save_fields(SAVERESTOREDATA *context,const char *name,void *data,TYP
     for(int i=0;i<count;i++){
         BhlSaveField *g=(void*)(G_MEM+description+i*sizeof *g);TYPEDESCRIPTION *h=fields+i;
         offset=(offset+3)&~3u;g->type=h->fieldType;g->name=save_text(h->fieldName);g->offset=offset;g->count=h->fieldSize;g->flags=h->flags;
-        save_field_copy((char*)data+h->fieldOffset,payload+offset,h->fieldType,h->fieldSize,1);offset+=save_field_size(h->fieldType,0)*h->fieldSize;
+        /* ReadFields receives output storage, including Xash's uninitialized
+           temporary entvars during global-entity level transitions. Only a
+           write may import native strings/pointers from that storage. The
+           original reader fills the zeroed payload before we copy it back. */
+        if(!read)save_field_copy((char*)data+h->fieldOffset,payload+offset,h->fieldType,h->fieldSize,1);
+        offset+=save_field_size(h->fieldType,0)*h->fieldSize;
     }
     uint32_t args[]={p->guest,save_text(name),payload,description,count};server_call(read?BHL_DLL_pfnSaveReadFields:BHL_DLL_pfnSaveWriteFields,args,5);save_end(p);
     if(read)for(int i=0;i<count;i++){BhlSaveField *g=(void*)(G_MEM+description+i*sizeof *g);save_field_copy((char*)data+fields[i].fieldOffset,payload+g->offset,fields[i].fieldType,fields[i].fieldSize,0);}

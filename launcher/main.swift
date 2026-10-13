@@ -12,6 +12,23 @@ struct Installation {
     var mod: URL { data.appendingPathComponent("bhl") }
     var saves: URL { mod.appendingPathComponent("save") }
     var log: URL { data.appendingPathComponent("Last Run.log") }
+    func openPlayLog(for process: Process) throws -> FileHandle {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: log.path), (try log.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? 0 > 0 {
+            let history = data.appendingPathComponent("Play Logs", isDirectory: true)
+            try fm.createDirectory(at: history, withIntermediateDirectories: true)
+            let date = (try log.resourceValues(forKeys: [.contentModificationDateKey])).contentModificationDate ?? Date()
+            let stamp = ISO8601DateFormatter().string(from: date).replacingOccurrences(of: ":", with: "-")
+            try fm.copyItem(at: log, to: history.appendingPathComponent("\(stamp)-\(UUID().uuidString).log"))
+        }
+        guard fm.createFile(atPath: log.path, contents: nil) else { throw failure("Could not open the play log.") }
+        let handle = try FileHandle(forWritingTo: log)
+        try handle.truncate(atOffset: 0)
+        let build = try String(contentsOf: resources.appendingPathComponent("Build.json"), encoding: .utf8)
+        let header = "BHL play started: \(ISO8601DateFormatter().string(from: Date()))\nBuild: \(build)\nArguments: \(process.arguments ?? [])\n"
+        try handle.write(contentsOf: Data(header.utf8))
+        return handle
+    }
     init() throws {
         guard let resource = Bundle.main.resourceURL else { throw failure("Run the installed app bundle.") }
         resources = resource
@@ -197,8 +214,7 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                              fullscreen: testScript != nil ? CommandLine.arguments.contains("--engine-test-fullscreen") : fullscreen?.state == .on,
                                              difficulty: difficulty?.indexOfSelectedItem ?? 1,
                                              frameRate: frameRate?.indexOfSelectedItem ?? 0, vsync: vsync?.state != .off, testScript: testScript)
-            FileManager.default.createFile(atPath: installation.log.path, contents: nil)
-            let handle = try FileHandle(forWritingTo: installation.log); try handle.truncate(atOffset: 0)
+            let handle = try installation.openPlayLog(for: p)
             p.standardOutput = handle; p.standardError = handle; output = handle
             // Inherit the same lock through stdin. If the launcher crashes,
             // its still-running engine continues to own this installation.
@@ -206,13 +222,15 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
             lastFailure = nil
             p.terminationHandler = { result in DispatchQueue.main.async {
                 self.crashMonitor?.invalidate(); self.crashMonitor = nil
+                let reason = result.terminationReason == .uncaughtSignal ? "signal" : "exit"
+                try? handle.write(contentsOf: Data("\nBHL play ended: \(ISO8601DateFormatter().string(from: Date())) — \(reason) \(result.terminationStatus)\n".utf8))
                 try? handle.close(); self.output = nil; self.child = nil
                 flock(self.sessionLock, LOCK_UN); close(self.sessionLock); self.sessionLock = -1
                 if testScript != nil { exit(result.terminationStatus) }
                 self.window.makeKeyAndOrderFront(nil); NSApp.unhide(nil); NSApp.activate(ignoringOtherApps: true)
                 if result.terminationStatus != 0 || self.lastFailure != nil || self.runtimeFailure() != nil {
                     let alert = NSAlert(); alert.messageText = "Brutal Half-Life stopped unexpectedly"
-                    alert.informativeText = "Open Files & Log to inspect Last Run.log. Your saves remain in Saved Games."; alert.runModal()
+                    alert.informativeText = "Open Files & Log to inspect Last Run.log and earlier Play Logs. macOS crash reports are in Console. Your saves remain in Saved Games."; alert.runModal()
                 }
             }}
             child = p; try p.run()
