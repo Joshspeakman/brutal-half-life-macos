@@ -20,6 +20,7 @@ typedef struct ModelData {const void *host;uint32_t guest,size,epoch;struct Mode
 static ModelData *model_data;
 typedef struct ModelMirror {const model_t *host;uint32_t guest,epoch;model_t snapshot;struct ModelMirror *next;} ModelMirror;
 static ModelMirror *model_mirrors;
+static ModelMirror *model_hosts[4096];
 static uint32_t model_epoch=1;
 static void model_invalidate(void){if(!++model_epoch)abort();}
 /* Video/map initialization invalidates borrowed model storage. Descriptors
@@ -57,8 +58,11 @@ static uint32_t studio_data(const void *host)
 }
 static uint32_t model_guest(const model_t *h)
 {
-    if(!h)return 0;ModelMirror *m=model_mirrors;while(m&&m->host!=h)m=m->next;
+    if(!h)return 0;uintptr_t key=(uintptr_t)h>>4;unsigned bucket=(key^(key>>12))&4095;
+    ModelMirror *m=model_hosts[bucket];
+    if(!m||m->host!=h){for(m=model_mirrors;m&&m->host!=h;m=m->next);}
     if(!m){m=calloc(1,sizeof *m);if(!m)abort();m->host=h;m->guest=bhl_heap_alloc(sizeof(BhlModel),1);m->next=model_mirrors;model_mirrors=m;}
+    model_hosts[bucket]=m;
     /* Model descriptors are engine-owned and unchanged through most studio
        callbacks. Avoid re-walking every model array and entity text lump. */
     if(m->epoch==model_epoch&&!memcmp(&m->snapshot,h,sizeof *h))return m->guest;

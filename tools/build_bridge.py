@@ -11,7 +11,7 @@ def main():
     upstream=ROOT/'work/upstream/xash3d-fwgs'
     out=ROOT/'work/bridge'
     includes=[ROOT/'runtime',out]+[upstream/p for p in ['common','engine','public','pm_shared','3rdparty/library_suffix/include']]
-    command=['clang','-arch','arm64','-std=gnu11','-O1','-g','-dynamiclib','-Wno-c2x-extensions']
+    command=['clang','-arch','arm64','-std=gnu11','-O2','-g','-dynamiclib','-Wno-c2x-extensions']
     for path in includes:command+=['-I',str(path)]
     staged=out/'hl_arm64.new.dylib'
     command += [str(ROOT/'runtime/server_bridge.c'),'-L',str(ROOT/'work/native'),'-lbhl',

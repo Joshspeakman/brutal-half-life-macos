@@ -101,5 +101,16 @@ int main(void)
     studio.GetCurrentEntity=studio_current;studio.StudioCheckBBox=studio_bbox;
     Ctx draw={0};draw.esp=bhl_heap_alloc(16,1);studio_dispatch(&draw,BHL_STUDIO_StudioCheckBBox);
     assert(draw.eax==1&&g->curstate.frame==77&&((BhlClientEntity*)(G_MEM+other))->origin[2]==123&&fixture_entities[2].origin[2]==0);
+    /* More identities than cache slots must not merge entities or discard
+       pending guest writes. Re-query in reverse order after collisions. */
+    cl_entity_t *many=calloc(4100,sizeof *many);uint32_t *ids=calloc(4100,sizeof *ids);
+    for(unsigned i=0;i<4100;i++){many[i].index=-1;many[i].origin[0]=i;ids[i]=entity_copy(many+i);((BhlClientEntity*)(G_MEM+ids[i]))->origin[1]=i+1;}
+    for(unsigned i=4100;i-->0;){assert(entity_reference(many+i)==ids[i]);assert(((BhlClientEntity*)(G_MEM+ids[i]))->origin[1]==i+1&&many[i].origin[1]==0);}
+    entities_push();for(unsigned i=0;i<4100;i++)assert(many[i].origin[1]==i+1);
+    entities_end();assert(!entity_find_active(many));assert(entity_copy(many)==ids[0]&&entity_find_active(many));
+    model_t *many_models=calloc(4100,sizeof *many_models);uint32_t *model_ids=calloc(4100,sizeof *model_ids);
+    for(unsigned i=0;i<4100;i++){many_models[i].type=mod_brush;many_models[i].numframes=i;model_ids[i]=model_guest(many_models+i);}
+    model_reset();
+    for(unsigned i=4100;i-->0;){many_models[i].numframes=i+1;assert(model_guest(many_models+i)==model_ids[i]);assert(((BhlModel*)(G_MEM+model_ids[i]))->numframes==i+1);}
     puts("Client boundaries passed: entity relocation, writes, temp lists, studio matrices");return 0;
 }

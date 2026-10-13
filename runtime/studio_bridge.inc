@@ -63,7 +63,7 @@ static void studio_sync(int push,int complete)
 {
     if(complete){if(push)entities_push();else entities_pull();return;}
     cl_entity_t *current=studio.GetCurrentEntity?studio.GetCurrentEntity():NULL;
-    for(EntityCopy *p=entities;p;p=p->next)if(p->active&&p->host==current){if(push)entity_push(p);else entity_pull(p);break;}
+    EntityCopy *p=entity_find_active(current);if(p){if(push)entity_push(p);else entity_pull(p);}
     for(LightCopy *p=lights;p;p=p->next){if(push)memcpy(p->host,G_MEM+p->guest,sizeof *p->host);else memcpy(G_MEM+p->guest,p->host,sizeof *p->host);}
     if(push)studio_push();else studio_pull();
 }

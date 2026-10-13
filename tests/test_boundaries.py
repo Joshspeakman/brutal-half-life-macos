@@ -12,7 +12,7 @@ def main():
     records=[]
     for side in ['server','client']:
         exe=out/side
-        command=['clang','-arch','arm64','-std=gnu11','-O1','-g','-Wno-c2x-extensions']
+        command=['clang','-arch','arm64','-std=gnu11','-O2','-g','-Wno-c2x-extensions']
         for include in includes:command+=['-I',str(include)]
         command+=[str(ROOT/f'tests/{side}_boundary_fixture.c'),'-L',str(ROOT/'work/native'),'-lbhl','-Wl,-rpath,@executable_path/../native','-o',str(exe)]
         subprocess.run(command,check=True)

@@ -121,6 +121,17 @@ Interactive menus and visual font fidelity remain unverified.
 
 ## Engine boundary
 
+The native renderer is OpenGL, with the original client's studio animation
+code adapted to Xash3D. There is no project Metal renderer. Profiling the
+campaign hub identified substantial CPU overhead in entity synchronization
+and identity searches. The adapters now compile with optimization level 2
+and cache entity/model identity lookups, preserving the existing state
+comparisons and writes. Entity pool replacement clears cached host identities;
+model epochs still invalidate borrowed data. Boundary tests exercise more
+identities than cache slots, pending writes, entity relocation and model reset.
+This improves the measured hub scene, but broader frame-time and campaign
+performance validation remains necessary.
+
 The server uses 159 engine entries, 50 game entries and five new-game entries.
 Guest globals/entvars/edicts are 172/676/804 bytes; native layouts differ.
 Entity pointers, string IDs, cvars, traces, private data and delta encoders

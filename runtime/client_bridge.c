@@ -139,6 +139,25 @@ _Static_assert(offsetof(BhlClientEntity,model)==2964,"guest client entity prefix
 _Static_assert(sizeof(BhlClientEntity)==3000,"guest client entity size");
 typedef struct EntityCopy {cl_entity_t *host;uint32_t guest;int source,index,active;uint32_t epoch;int valid;cl_entity_t host_snapshot;BhlClientEntity guest_snapshot;struct EntityCopy *next;} EntityCopy;
 static EntityCopy *entities;
+/* Most renderer callbacks revisit the same few entities. Cache identity
+   lookups only; every existing synchronization/lifetime check still runs. */
+static EntityCopy *entity_hosts[4096];
+static unsigned entity_bucket(const void *host){uintptr_t h=(uintptr_t)host>>4;return (h^(h>>12))&4095;}
+static EntityCopy *entity_find(cl_entity_t *host)
+{
+    if(!host)return NULL;unsigned bucket=entity_bucket(host);EntityCopy *p=entity_hosts[bucket];
+    if(p&&p->host==host)return p;
+    for(p=entities;p;p=p->next)if(p->host==host){entity_hosts[bucket]=p;return p;}
+    return NULL;
+}
+static EntityCopy *entity_find_active(cl_entity_t *host)
+{
+    EntityCopy *p=entity_find(host);if(!p||p->active)return p;
+    /* Preserve the existing active-mirror selection if a pool replacement
+       temporarily leaves more than one record for a native address. */
+    for(p=p->next;p;p=p->next)if(p->host==host&&p->active)return p;
+    return NULL;
+}
 typedef struct TextCopy {client_textmessage_t *host;uint32_t guest,name,message;struct TextCopy *next;} TextCopy;
 static TextCopy *texts;
 static uint32_t player_names[65],player_models[65];
@@ -158,8 +177,12 @@ static uint32_t text_copy(client_textmessage_t *h)
 }
 static void entity_pull(EntityCopy *p)
 {
+    cl_entity_t *previous=p->host;
     if(p->source==1)p->host=engine.GetViewModel();
     else if(p->source==2)p->host=engine.GetEntityByIndex(p->index);
+    /* Signon can replace the complete native entity allocation. Discard
+       cached host identities before any pointer from that pool is reused. */
+    if(p->host!=previous)memset(entity_hosts,0,sizeof entity_hosts);
     if(!p->host||!p->active)return;
     cl_entity_t *h=p->host;
     if(p->valid&&p->epoch==model_epoch&&!memcmp(&p->host_snapshot,h,sizeof *h)){
@@ -187,10 +210,10 @@ static void entities_push(void){temp_entities_prepare(1);for(EntityCopy *p=entit
 static void entities_end(void){for(EntityCopy *p=entities;p;p=p->next)if(!p->source)p->active=0;}
 static uint32_t entity_copy(cl_entity_t *h)
 {
-    if(!h)return 0;EntityCopy *p=entities;while(p&&p->host!=h)p=p->next;
+    if(!h)return 0;EntityCopy *p=entity_find(h);
     /* Reserve a tempent prefix so an entity first seen in a renderer callback
        can later acquire its containing TEMPENTITY without changing address. */
-    if(!p){p=calloc(1,sizeof *p);if(!p)abort();p->host=h;p->guest=bhl_heap_alloc(68+sizeof(BhlClientEntity),1)+68;p->next=entities;entities=p;
+    if(!p){p=calloc(1,sizeof *p);if(!p)abort();p->host=h;p->guest=bhl_heap_alloc(68+sizeof(BhlClientEntity),1)+68;p->next=entities;entities=p;entity_hosts[entity_bucket(h)]=p;
         if(engine.GetViewModel&&h==engine.GetViewModel())p->source=1;
         else if(engine.GetEntityByIndex&&h->index>=0&&h->index<65536&&h==engine.GetEntityByIndex(h->index)){p->source=2;p->index=h->index;}}
     p->active=1;
@@ -201,7 +224,7 @@ static uint32_t entity_copy(cl_entity_t *h)
 static uint32_t entity_reference(cl_entity_t *h)
 {
     if(!h)return 0;
-    for(EntityCopy *p=entities;p;p=p->next)if(p->host==h&&p->active)return p->guest;
+    EntityCopy *p=entity_find_active(h);if(p)return p->guest;
     return entity_copy(h);
 }
 static cl_entity_t *entity_host(uint32_t g)
@@ -209,7 +232,7 @@ static cl_entity_t *entity_host(uint32_t g)
     if(!g)return NULL;for(EntityCopy *p=entities;p;p=p->next)if(p->guest==g){if(!p->active)client_missing("entity used after callback lifetime");entity_push(p);return p->host;}
     if(g<65536||(uint64_t)g+sizeof(BhlClientEntity)>0x100000000ull)client_missing("invalid guest entity");
     EntityCopy *p=calloc(1,sizeof *p);if(!p)abort();p->host=calloc(1,sizeof *p->host);if(!p->host)abort();
-    p->guest=g;p->source=3;p->active=1;p->next=entities;entities=p;entity_push(p);return p->host;
+    p->guest=g;p->source=3;p->active=1;p->next=entities;entities=p;entity_hosts[entity_bucket(p->host)]=p;entity_push(p);return p->host;
 }
 #include "effects_bridge.inc"
 #include "studio_bridge.inc"

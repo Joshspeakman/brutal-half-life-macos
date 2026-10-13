@@ -13,6 +13,9 @@ runtime uses a 32-bit guest address space and explicit adapters to native
 Xash3D. Wine and Rosetta are not used. Unicorn executes original instructions
 only for development comparisons.
 
+Graphics currently use Xash3D's OpenGL renderer. Native ARM64 execution does
+not mean a native Metal backend; no Metal renderer is implemented here.
+
 ## Reproduce the development build
 
 Requirements: Apple Silicon, Xcode Command Line Tools, Python 3, Git,
