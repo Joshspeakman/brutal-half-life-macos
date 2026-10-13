@@ -60,9 +60,27 @@ def main():
         while time.monotonic()<deadline and n.lib.bhl_audio_nonzero_samples()==count:time.sleep(.05)
         decoded=n.lib.bhl_audio_nonzero_samples()-count
         assert decoded>0,(source.name,'no decoded PCM reached output')
+        assert call('_FSOUND_SetVolume@8',channel,96)&255==1
+        assert call('_FSOUND_GetVolume@4',channel)==96
+        assert call('_FSOUND_SetPan@8',channel,192)&255==1
+        assert call('_FSOUND_GetPan@4',channel)==192
+        assert call('_FSOUND_SetPaused@8',channel,1)&255==1
+        assert call('_FSOUND_GetPaused@4',channel)&255==1
+        paused=call('_FSOUND_Stream_GetTime@4',stream)
+        time.sleep(.15)
+        assert call('_FSOUND_Stream_GetTime@4',stream)==paused,(source.name,'paused stream advanced')
+        assert call('_FSOUND_Stream_SetTime@8',stream,500)&255==1
+        seeked=call('_FSOUND_Stream_GetTime@4',stream)
+        assert abs(seeked-500)<50,(source.name,seeked)
+        assert call('_FSOUND_SetPaused@8',channel,0)&255==1
+        assert call('_FSOUND_GetPaused@4',channel)&255==0
+        time.sleep(.15)
+        resumed=call('_FSOUND_Stream_GetTime@4',stream)
+        assert resumed>seeked,(source.name,'resumed stream did not advance',seeked,resumed)
         assert call('_FSOUND_Stream_Stop@4',stream)&255==1
         assert call('_FSOUND_Stream_Close@4',stream)&255==1
-        streams.append(dict(name=source.name,length_ms=length,nonzero_output_samples=decoded))
+        streams.append(dict(name=source.name,length_ms=length,nonzero_output_samples=decoded,
+                            pause_resume=True,seek_ms=seeked,volume_pan=True))
     call('_FSOUND_Close@0')
     changed=[hex(p) for p,blob in before if n.read(p,len(blob))!=blob]
     assert not changed,f'Executable guest sections changed: {changed}'

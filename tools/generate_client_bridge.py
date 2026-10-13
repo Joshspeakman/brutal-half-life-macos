@@ -13,7 +13,7 @@ def scalar_body(returns, arguments, callee):
         arg=re.sub(r'(\w+)\s*\[[^]]*\]',r'* \1',arg)
         arg=' '.join(arg.replace('*',' * ').split())
         kind=arg if arg.endswith('*') else arg.rsplit(' ',1)[0]
-        if kind in ('int','const int','unsigned int','unsigned short','unsigned char','char','qboolean','HSPRITE','TRICULLSTYLE'):
+        if kind in ('int','const int','unsigned int','unsigned short','short','unsigned char','char','qboolean','HSPRITE','TRICULLSTYLE'):
             converted.append(f'({kind})A({word})')
         elif kind=='float':converted.append(f'rt_rf32(G_MEM,c->esp+{4+word*4})')
         elif kind in ('char *','const char *'):converted.append(f'gs(A({word}))')
@@ -80,6 +80,11 @@ def main():
     (out / 'client_engine_abi.h').write_text(header)
     subheaders = dict(pTriAPI='triangleapi.h',pEfxAPI='r_efx.h',pEventAPI='event_api.h',pDemoAPI='demo_api.h',pNetAPI='net_api.h',pVoiceTweak='ivoicetweak.h')
     subcode = ''
+    for i in range(128):
+        subcode+=f'static void projectile_{i}(TEMPENTITY *h,pmtrace_t *t){{projectile_hit({i},h,t);}}\n'
+        subcode+=f'static void tracer_{i}(particle_t *h){{tracer_death({i},h);}}\n'
+    subcode+='static void (*projectile_callbacks[])(TEMPENTITY *,pmtrace_t *)={'+','.join(f'projectile_{i}' for i in range(128))+'};\n'
+    subcode+='static void (*tracer_callbacks[])(particle_t *)={'+','.join(f'tracer_{i}' for i in range(128))+'};\n'
     builders = ''
     for e in entries:
         if e['kind'] != 'table': continue
@@ -95,6 +100,11 @@ def main():
                 if name=='pTriAPI_SpriteTexture':body='RET(engine.pTriAPI->SpriteTexture(model_host(A(0)),A(1)));'
                 if name in ('pEfxAPI_CL_AllocDlight','pEfxAPI_CL_AllocElight'):body=f'RET(light_guest(engine.{e["name"]}->{match[2]}(A(0))));'
                 if name=='pEfxAPI_R_AllocParticle':body='RET(particle_alloc(A(0)));'
+                if name=='pEfxAPI_CL_TentEntAllocCustom':body='RET(temp_custom_alloc((float*)gs(A(0)),model_host(A(1)),A(2),A(3)));'
+                if name=='pEfxAPI_R_Projectile':body='engine.pEfxAPI->R_Projectile((float*)gs(A(0)),(float*)gs(A(1)),A(2),A(3),A(4),projectile_callback(A(5)));RET(0);'
+                if name=='pEfxAPI_R_UserTracerParticle':body='engine.pEfxAPI->R_UserTracerParticle((float*)gs(A(0)),(float*)gs(A(1)),rt_rf32(G_MEM,c->esp+12),A(3),rt_rf32(G_MEM,c->esp+20),A(5),tracer_callback(A(6)));RET(0);'
+                if name=='pEventAPI_EV_PlaybackEvent':body='playback_event(c,1);RET(0);'
+                if name=='pEventAPI_EV_PlayerTraceExt':body='event_trace_ext(c);RET(0);'
                 if name in ('pEventAPI_EV_GetPhysent','pEventAPI_EV_GetVisent'):body=f'RET(event_physent(engine.{e["name"]}->{match[2]}(A(0))));'
                 if name in ('pEfxAPI_CL_TempEntAlloc','pEfxAPI_CL_TempEntAllocHigh'):body=f'RET(temp_guest(engine.{e["name"]}->{match[2]}((float*)gs(A(0)),model_host(A(1)))));'
                 if name=='pEfxAPI_CL_TempEntAllocNoModel':body='RET(temp_guest(engine.pEfxAPI->CL_TempEntAllocNoModel((float*)gs(A(0)))));'
@@ -109,7 +119,14 @@ def main():
                 # Triangle calls consume their explicit scalar/array inputs
                 # and renderer state, never the mirrored client entity list.
                 # Copying that list per vertex makes immediate drawing costly.
-                sync='' if e['name']=='pTriAPI' else 'entities_push(); '
+                # Audited pinned cl_game/pm_trace implementations use only
+                # model/decal tables or prepared physents. The Ext trace can
+                # reenter guest code and retains the full boundary.
+                independent_sub = {'pEventAPI_EV_FindModelIndex',
+                    'pEventAPI_EV_SetTraceHull', 'pEventAPI_EV_PlayerTrace',
+                    'pEfxAPI_Draw_DecalIndex', 'pEfxAPI_Draw_DecalIndexFromName',
+                    'pEfxAPI_R_GetPackedColor', 'pEfxAPI_R_LookupColor'}
+                sync='' if e['name']=='pTriAPI' or name in independent_sub else 'entities_push(); '
                 if body and not sync:body=body.replace('RET(','RAW_RET(')
                 subcode += f'static void sub_{name}(Ctx *c) {{ '+sync+(body or f'client_missing("{e["name"]}.{match[2]}");')+' }\n'
                 builders += f'if(engine.{e["name"]}->{match[2]})rt_w32(G_MEM,p+{i*4},bhl_thunk("client-subtable!{name}",sub_{name}));\n'
@@ -167,7 +184,22 @@ def main():
             elif returns in ('char *','const char *'): statement = 'RET(copy_string('+call+'));'
             else: continue
             scalars.append((e['name'],f'case BHL_CL_{e["name"]}: {statement}\n'))
-    (out / 'client_scalar_callbacks.h').write_text(''.join(s for _, s in scalars))
+    # These pinned engine calls read scalar state, do math, or draw 2D pixels.
+    # They neither consume nor mutate mirrored entities/effects/studio arrays.
+    # Keep all callbacks with entity effects on the synchronized path.
+    independent = set('''pfnSPR_Frames pfnSPR_Height pfnSPR_Width pfnSPR_Set
+        pfnSPR_Draw pfnSPR_DrawHoles pfnSPR_DrawAdditive pfnSPR_EnableScissor
+        pfnSPR_DisableScissor pfnFillRGBA pfnFillRGBABlend pfnDrawCharacter
+        pfnDrawConsoleString pfnDrawSetTextColor pfnDrawConsoleStringLen
+        pfnDrawString pfnDrawStringReverse pfnSPR_DrawGeneric
+        pfnGetCvarFloat pfnGetCvarString pfnAngleVectors GetWindowCenterX
+        GetWindowCenterY GetViewAngles GetMaxClients Cmd_Argc Cmd_Argv
+        GetClientMaxspeed GetMousePosition IsNoClipping GetClientTime
+        pfnRandomFloat pfnRandomLong Con_IsVisible pfnGetGameDirectory
+        Key_LookupBinding pfnGetLevelName IsSpectateOnly pfnGetClientOldTime
+        pfnGetGravity pfnSys_FloatTime pfnGetAppID PM_PointContents PM_WaterEntity'''.split())
+    (out / 'client_scalar_callbacks.h').write_text(''.join(s for n, s in scalars if n not in independent))
+    (out / 'client_independent_callbacks.h').write_text(''.join(s.replace('RET(', 'RAW_RET(') for n, s in scalars if n in independent))
     # Export exact native signatures. Unsupported exports abort by name.
     declarations = strip_comments((upstream / 'engine/cdll_exp.h').read_text())
     declarations = declarations.split('typedef struct cldll_func_s')[1].split('{',1)[1].split('} cldll_func_t;')[0]

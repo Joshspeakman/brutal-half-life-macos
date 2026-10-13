@@ -1,8 +1,8 @@
 """Reproduce the current native development build from the user's own inputs.
 
-This builds all four modules and both bridges. It does not install a playable
-app. --check-client remains an acceptance test and currently reports missing
-client integrations as failures.
+This builds all four modules and both bridges into an isolated session.
+Use install.sh to package a local application after the build. Checks cover
+bounded integration; they do not establish complete campaign equivalence.
 """
 import argparse
 import hashlib
@@ -28,7 +28,7 @@ def main():
     ap.add_argument('--archive',type=Path,required=True)
     ap.add_argument('--valve',type=Path,help='Owned Half-Life valve data, required for engine tests')
     ap.add_argument('--check',action='store_true',help='Run service, startup differential and server map checks')
-    ap.add_argument('--check-client',action='store_true',help='Also run the currently incomplete client acceptance test')
+    ap.add_argument('--check-client',action='store_true',help='Also run the bounded OpenGL client save/load acceptance test')
     args=ap.parse_args()
     if (args.check or args.check_client) and not args.valve:ap.error('--valve is required for engine tests')
     archive=args.archive.expanduser().resolve()
@@ -78,7 +78,7 @@ def main():
         for module in MODULES:run('differential-'+module,'tests/test_startup_differential.py','--module',module)
         run('server-map','tests/test_engine.py','--map','c0a0')
     if args.check_client:run('client-engine','tests/test_client_engine.py','--renderer','gl','--video-driver','cocoa','--map','_zoo','--save-load','--capture-frames','25','--seconds','90')
-    print('Native development build complete. Client gameplay and app packaging remain incomplete.')
+    print('Native development build complete. Full campaign validation remains separate; use tools/package_app.py to package this local build.')
 
 
 if __name__=='__main__':main()

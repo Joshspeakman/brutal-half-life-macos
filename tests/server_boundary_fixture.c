@@ -1,11 +1,13 @@
 #include "../runtime/server_bridge.c"
 #include <assert.h>
-static edict_t fixture_edicts[8];
+static edict_t fixture_pool[16],*fixture_edicts=fixture_pool;
 static char fixture_strings[65536];static unsigned fixture_used=1,allocations;
 static const char *string_value(int id){assert(id>=0&&(unsigned)id<fixture_used);return fixture_strings+id;}
 static int string_alloc(const char *text)
 {int p=fixture_used;size_t size=strlen(text)+1;assert(size+fixture_used<sizeof fixture_strings);memcpy(fixture_strings+p,text,size);fixture_used+=size;allocations++;return p;}
-static edict_t *entity_at(int index){assert(index>=0&&index<8);return fixture_edicts+index;}
+static edict_t *entity_at(int index){assert(index>=0&&index<16);return fixture_edicts+index;}
+static edict_t *find_sphere(edict_t *start,const float *origin,float radius)
+{assert(!start&&origin[0]==5&&radius==12);assert(fixture_edicts[1].v.absmin[0]==-9&&fixture_edicts[1].v.absmax[0]==19);assert(fixture_edicts[1].v.health==0);return fixture_edicts+1;}
 static void save_roundtrip(void)
 {
     typedef struct {char title[13];int string_id;edict_t *target;float position[3],time;int counts[3];short number;} Record;
@@ -46,6 +48,25 @@ static void save_roundtrip(void)
     sync_basic_globals();assert(!save_mirrors);
     puts("Original save serializer roundtrip passed: typed fields, time, landmarks, references, tokens, function names");
 }
+static void tank_sprite_lifetime(void)
+{
+    uint32_t sprite=bhl_heap_alloc(0x260,1),other=bhl_heap_alloc(0x260,1);
+    rt_w32(G_MEM,sprite,0x10200598);rt_w32(G_MEM,other,0x10200598);
+    const uint32_t tables[]={0x102028ac,0x1020268c,0x1020279c,0x10202474,0x10200598};
+    for(unsigned i=0;i<5;i++){
+        private_data[i]=bhl_heap_alloc(0x2c4,1);fixture_edicts[i].pvPrivateData=(void*)1;fixture_edicts[i].free=0;
+        rt_w32(G_MEM,private_data[i],tables[i]);rt_w32(G_MEM,private_data[i]+0x22c,sprite);
+    }
+    /* Live/unrelated sprites and unrelated classes retain their references. */
+    v3_retire_sprite(other);for(unsigned i=0;i<5;i++)assert(rt_r32(G_MEM,private_data[i]+0x22c)==sprite);
+    v3_retire_sprite(sprite);
+    for(unsigned i=0;i<5;i++)assert(rt_r32(G_MEM,private_data[i]+0x22c)==(i==4?sprite:0));
+    bhl_heap_free(sprite);uint32_t reused=bhl_heap_alloc(0x260,1);assert(reused==sprite);
+    for(unsigned i=0;i<4;i++)assert(!rt_r32(G_MEM,private_data[i]+0x22c));
+    for(unsigned i=0;i<5;i++){bhl_heap_free(private_data[i]);private_data[i]=0;fixture_edicts[i].pvPrivateData=NULL;}
+    bhl_heap_free(reused);bhl_heap_free(other);
+    puts("Mounted-weapon sprite lifetime passed: expired references clear before allocation reuse");
+}
 int main(void)
 {
     bhl_initialize();globalvars_t globals={0};host_globals=&globals;globals.maxEntities=8;globals.maxClients=1;globals.pStringBase=fixture_strings;
@@ -66,5 +87,20 @@ int main(void)
     int original=fixture_edicts[1].v.classname;strcpy(fixture_strings+original,"crayer");
     sync_basic_globals();assert(!strcmp(gs(guest_strings+g->v.classname),"crayer"));
     save_roundtrip();
+    edict_t replacement[16]={0};uint32_t identity=guest_edict(fixture_edicts+1);
+    fixture_edicts=replacement;globals.maxEntities=16;fixture_edicts[1].v.origin[2]=321;
+    sync_basic_globals();assert(guest_edict(fixture_edicts+1)==identity&&host_edict(identity)==fixture_edicts+1&&g->v.origin[2]==321);
+    unsigned char model[256]={0};uint32_t magic=0x54534449,version=10,length=sizeof model;
+    memcpy(model,&magic,4);memcpy(model+4,&version,4);memcpy(model+72,&length,4);model[244]=17;
+    uint32_t mg=model_copy(model);assert(G_MEM[mg+244]==17);model[244]=29;model_invalidate();
+    assert(model_copy(model)==mg&&G_MEM[mg+244]==29);
+    engine.pfnFindEntityInSphere=find_sphere;g->v.absmin[0]=-9;g->v.absmax[0]=19;g->v.health=123;
+    Ctx query={0};query.esp=bhl_heap_alloc(32,1);uint32_t sp=query.esp,origin=bhl_heap_alloc(12,1);rt_wf32(G_MEM,origin,5);
+    rt_w32(G_MEM,sp+4,identity);engine_dispatch(&query,BHL_ENG_pfnEntOffsetOfPEntity);
+    assert(query.eax==sizeof(BhlEdict)&&g->v.health==123&&fixture_edicts[1].v.health==0);
+    query.esp=sp;rt_w32(G_MEM,sp+4,0);rt_w32(G_MEM,sp+8,origin);rt_wf32(G_MEM,sp+12,12);
+    engine_dispatch(&query,BHL_ENG_pfnFindEntityInSphere);
+    assert(query.eax==identity&&g->v.health==123&&fixture_edicts[1].v.health==0);
+    tank_sprite_lifetime();
     puts("Server boundaries passed: string IDs, viewmodels, globals, allocation reuse");return 0;
 }

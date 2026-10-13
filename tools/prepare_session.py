@@ -88,6 +88,7 @@ gamemode "singleplayer_only"
                 if hashlib.sha256((ROOT/filename).read_bytes()).hexdigest()!=digest:
                     raise RuntimeError(f'Client bridge is stale: {filename}')
             full=ROOT/'work/upstream/xash3d-fwgs/build-client'
+            stage_binary(full/'3rdparty/extras/extras.pk3',out/'valve/extras.pk3')
             for source,target in [('game_launch/xash3d','xash3d'),('engine/libxash.dylib','libxash.dylib'),('3rdparty/mainui/libmenu.dylib','libmenu.dylib'),('ref/gl/libref_gl.dylib','libref_gl.dylib'),('ref/soft/libref_soft.dylib','libref_soft.dylib'),('ref/null/libref_null.dylib','libref_null.dylib')]:
                 stage_binary(full/source,out/target)
             stage_binary(ROOT/'work/bridge/client_arm64.dylib',out/'bhl/cl_dlls/client_arm64.dylib')

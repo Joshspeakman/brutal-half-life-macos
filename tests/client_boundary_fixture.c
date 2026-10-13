@@ -4,6 +4,11 @@ static cl_entity_t *fixture_entities;
 static cl_entity_t view_entity;
 static cl_entity_t *get_entity(int index){return index>=0&&index<3?&fixture_entities[index]:NULL;}
 static cl_entity_t *get_view(void){return &view_entity;}
+static float fixture_time(void){return 12.5f;}
+static int fixture_contents(const float *point,int *actual){assert(point[0]==8);*actual=-3;return -3;}
+static model_t *fixture_model(const char *name,int *index){assert(!strcmp(name,"fixture-model"));*index=11;return fixture_entities[1].model;}
+static cl_entity_t *studio_current(void){return &fixture_entities[1];}
+static int studio_bbox(void){assert(fixture_entities[1].origin[2]==44&&fixture_entities[2].origin[2]==0);fixture_entities[1].curstate.frame=77;return 1;}
 static void native_particle_think(particle_t *p,float frame){p->vel[1]+=frame;}
 int main(void)
 {
@@ -14,6 +19,22 @@ int main(void)
     uint32_t p=entity_copy(&fixture_entities[1]);BhlClientEntity *g=(void*)(G_MEM+p);
     assert(g->origin[0]==42&&model_host(g->model)==&model);
     g->origin[1]=17;g->curstate.frame=8;entities_push();assert(fixture_entities[1].origin[1]==17&&fixture_entities[1].curstate.frame==8);
+    /* Independent engine queries must retain guest writes without copying
+       the whole entity list to the host or overwriting those writes. */
+    engine.GetClientTime=fixture_time;g->curstate.frame=99;
+    Ctx query={0};query.esp=bhl_heap_alloc(16,1);rt_w32(G_MEM,query.esp+4,1);
+    uint32_t query_stack=query.esp;client_dispatch(&query,BHL_CL_GetEntityByIndex);
+    assert(query.eax==p&&query.esp==query_stack+4&&g->curstate.frame==99&&fixture_entities[1].curstate.frame==8);
+    query.esp=query_stack;client_dispatch(&query,BHL_CL_GetClientTime);
+    assert(query.esp==query_stack+4&&g->curstate.frame==99&&fixture_entities[1].curstate.frame==8);
+    engine.PM_PointContents=fixture_contents;engine.CL_LoadModel=fixture_model;
+    uint32_t values=bhl_heap_alloc(32,1),name=copy_string("fixture-model");rt_wf32(G_MEM,values,8);
+    query.esp=query_stack;rt_w32(G_MEM,query_stack+4,values);rt_w32(G_MEM,query_stack+8,values+12);client_dispatch(&query,BHL_CL_PM_PointContents);
+    assert((int32_t)query.eax==-3&&(int32_t)rt_r32(G_MEM,values+12)==-3&&g->curstate.frame==99&&fixture_entities[1].curstate.frame==8);
+    query.esp=query_stack;rt_w32(G_MEM,query_stack+4,name);rt_w32(G_MEM,query_stack+8,values+12);client_dispatch(&query,BHL_CL_CL_LoadModel);
+    assert(model_host(query.eax)==&model&&rt_r32(G_MEM,values+12)==11&&g->curstate.frame==99&&fixture_entities[1].curstate.frame==8);
+    bhl_heap_free(values);bhl_heap_free(name);
+    entities_push();assert(fixture_entities[1].curstate.frame==99);bhl_heap_free(query_stack);
     /* Real engine replaces this allocation at signon. The cached entity ID
        must resolve anew without touching its now-freed model pointer. */
     cl_entity_t *old=fixture_entities;fixture_entities=calloc(3,sizeof *fixture_entities);fixture_entities[1].index=1;fixture_entities[1].origin[0]=99;
@@ -23,8 +44,10 @@ int main(void)
     uint32_t f=temp_guest(free_head),a=temp_guest(active_head),heads=bhl_heap_alloc(8,1);
     temp_free_head=&free_head;temp_active_head=&active_head;temp_guest_heads=heads;
     rt_w32(G_MEM,heads,a);rt_w32(G_MEM,heads+4,0);
+    ((BhlTempEntity*)(G_MEM+a))->entity.origin[2]=123;
     ((BhlTempEntity*)(G_MEM+a))->next=f;entities_push();
     assert(free_head==&temp[2]&&free_head->next==&temp[0]&&!active_head);
+    assert(temp[2].entity.origin[2]==0); /* free bodies are not published */
     /* An engine effect allocates while the original update is in progress. */
     TEMPENTITY *allocated=free_head;free_head=allocated->next;allocated->next=active_head;active_head=allocated;allocated->entity.curstate.frame=23;
     entities_pull();assert(rt_r32(G_MEM,heads)==f&&rt_r32(G_MEM,heads+4)==a);
@@ -58,5 +81,12 @@ int main(void)
     uint32_t bg=beam_guest(beam);BhlBeam *gb=(void*)(G_MEM+bg);assert(beam_host(gb->next)==beam+1&&model_host(gb->model)==&model&&particle_host(gb->particles)==particle);
     gb->width=12;gb->brightness=0.8f;gb->next=0;beams_push();assert(beam[0].width==12&&beam[0].brightness==0.8f&&!beam[0].next);
     beam[0].die=9;beams_pull();assert(gb->die==9&&beam_guest(beam)==bg);
+    netadr_t remote={0};remote.type=NA_LOOPBACK;char response[32];memset(response,0x5a,sizeof response);int response_size=sizeof response;
+    assert(HUD_ConnectionlessPacket(&remote,"fixture",response,&response_size)==0&&response_size==0&&response[0]==0x5a);
+    fixture_entities[2].index=2;uint32_t other=entity_copy(&fixture_entities[2]);
+    ((BhlClientEntity*)(G_MEM+other))->origin[2]=123;g->origin[2]=44;
+    studio.GetCurrentEntity=studio_current;studio.StudioCheckBBox=studio_bbox;
+    Ctx draw={0};draw.esp=bhl_heap_alloc(16,1);studio_dispatch(&draw,BHL_STUDIO_StudioCheckBBox);
+    assert(draw.eax==1&&g->curstate.frame==77&&((BhlClientEntity*)(G_MEM+other))->origin[2]==123&&fixture_entities[2].origin[2]==0);
     puts("Client boundaries passed: entity relocation, writes, temp lists, studio matrices");return 0;
 }

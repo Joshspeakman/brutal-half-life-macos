@@ -20,6 +20,7 @@ def main():
     subprocess.run(['codesign','--force','--sign','-',str(staged)],check=True)
     staged.replace(out/'hl_arm64.dylib')
     paths=[ROOT/'runtime/server_bridge.c',ROOT/'runtime/guest_format.inc',ROOT/'runtime/model_bridge.inc',ROOT/'runtime/movement_bridge.inc',ROOT/'runtime/save_bridge.inc',ROOT/'tools/generate_bridge.py',ROOT/'tools/build_bridge.py',ROOT/'work/native/libbhl.dylib',out/'hl_arm64.dylib']
+    paths.append(ROOT/'runtime/v3_lifetime.inc')
     (out/'build.json').write_text(json.dumps({str(p.relative_to(ROOT)):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths},indent=2)+'\n')
 
 

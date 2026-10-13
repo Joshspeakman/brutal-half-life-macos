@@ -1,10 +1,11 @@
 # Brutal Half-Life v3 native recompilation
 
 Local development of an Apple Silicon port using the original v3 modules.
-**This is not a finished playable app yet.** The original client connects to
-the native engine, renders the intro and showcase maps, and completes a
-showcase save/load/quit test. Combat, campaign behavior, performance and the
-Mac launcher still need work.
+**The complete conversion is still under validation.** A local Mac app now
+launches the original client and server, renders the campaign hub and showcase,
+plays decoded audio, and supports native saves. Full campaign behavior,
+interactive controls, audible/visual comparison and performance need further
+validation before this can be considered finished.
 
 Original x86 instructions are translated to C and compiled to ARM64. The
 runtime uses a 32-bit guest address space and explicit adapters to native
@@ -35,6 +36,25 @@ All input copies, third-party checkouts, generated game code, binaries and
 reports stay in ignored `work/`. Source game folders and saves are unchanged.
 A build does not install or publish an application.
 
+To build a local app, use the same owned inputs:
+
+```sh
+./install.sh --archive /path/to/bhl_v3.zip --valve /path/to/owned/Half-Life/valve
+```
+
+The default app is `~/Applications/Brutal Half-Life.app`; separate game data,
+settings, saves and `Last Run.log` are under
+`~/Library/Application Support/Brutal Half-Life`. `--app` and `--data-dir`
+override these locations. Repeating the command replaces only this project's
+app and preserves its existing user data. `--check` runs the development checks.
+The bundle carries its native runtime libraries, prepared image data, icon and
+menu artwork. It does not require Homebrew at launch. It is a local build from
+owned inputs, not an artifact to distribute.
+
+The launcher offers the game menu, campaign hub, weapon showcase, and latest
+save, plus resolution, fullscreen and difficulty. The Controls button explains
+v3's bindings; detailed input/audio/video settings remain in the game menu.
+
 ## Verified progress
 
 | Area | Evidence |
@@ -47,11 +67,12 @@ A build does not install or publish an application.
 | Server integration | GameInit, movement initialization and three delta encoders run through native callbacks |
 | Headless map | `c0a0` activates and completes at least ten server frames in a bounded session |
 | Client integration | Original movement, studio animation, entities and temporary effects cross the native boundary; OpenGL produces a coherent showcase scene and view model |
-| Audio | Original FMOD decodes synthetic WAV and owned game MP3 data to nonzero PCM on the SDL dummy device; five mixer/locking tests pass |
+| Audio | Original FMOD decodes WAV and game MP3 data to nonzero PCM; pause/resume, seek, volume, pan and shutdown checks pass on dummy audio |
 | VGUI | Original App, Label and Surface code produces text textures through CoreText, paints through the engine API and passes surface restart checks |
-| Saving | Original field serializer round-trips strings, entities, time and landmarks; the showcase saves, reloads, runs again and exits cleanly |
-| Combat smoke test | A scripted pistol/shotgun/rocket session reaches original firing events, requests map music, saves, reloads and quits; this does not validate every weapon or enemy |
-| Complete conversion | Pending: combat, remaining effects, audible/visual comparison, campaign transitions, performance and app packaging |
+| Saving | Original serializer handles fields, entities, time and landmarks; packaged tests cover fresh-process reload and the first tram landmark transition |
+| Combat smoke tests | All 36 exported weapon classes have been requested across scripted primary/secondary/reload and save/load batches; equipping variants and hit behavior need gameplay comparison |
+| Mac packaging | Five packaged-launcher checks pass: menu, campaign hub, save, fresh-process reload and landmark transition; bundled libraries load without Homebrew dependencies |
+| Complete conversion | Pending: complete map/campaign coverage, interactive and audible/visual comparison, remaining runtime edge cases and performance |
 
 Startup comparisons share the native OS-service model. They validate the
 translation, **not Windows API equivalence**. Null rendering and dummy audio
@@ -74,6 +95,11 @@ paths. `tools/build_project.py --check-client` runs the OpenGL save/load test.
 
 Native saves preserve v3 callbacks that lack exported names using identifiers
 tied to the exact server binary. Windows save compatibility is not established.
+
+`tests/test_map_matrix.py` exercises all shipped BHL maps for activation,
+initial simulation, capture and normal shutdown. `--resume` reuses passes only
+for the same staged binaries. `tests/test_weapon_matrix.py` checks scripted
+weapon batches. Neither constitutes a full playthrough.
 
 See [port status and acceptance criteria](docs/PORT.md) and
 [dependency provenance](NOTICE.txt). Original assets and generated game code

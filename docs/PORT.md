@@ -79,11 +79,13 @@ original serializer handles the file encoding. A separate fixture checks
 strings, entity references, time rebasing, landmark offsets, token lifetimes
 and exported/unexported function references. Unexported callbacks use a
 binary-digest-qualified RVA identifier in native saves. Compatibility with
-Windows saves, quicksave/autosave and campaign transitions remain unverified.
+Windows saves and quicksave/autosave remain unverified. The packaged app also
+passes a fresh-process showcase reload and a `c0a0` to `c0a0a` transition using
+the `c0a0toa` landmark, then saves and reloads the destination map.
 
-A scripted `_zoo` session gives/selects the pistol, shotgun and rocket
-launcher, runs primary/secondary attack and reload commands, requests map
-music, then saves, reloads and quits. Original event handlers execute without
+Scripted `_zoo` batches request all 36 exported weapon class names, run
+primary/secondary attack and reload commands, request map music, then save,
+reload and quit. Original event handlers execute without
 an adapter fault in this test. Dynamic lights and tracer particles have mutable
 native mirrors; fixtures also cover particle callbacks and beam records.
 The command script is a smoke test, not evidence that every input, animation,
@@ -97,7 +99,8 @@ separate TEB/TLS state, suspended startup, event reset modes and cooperative
 termination. The original FMOD passes initialization at 44.1 kHz, worker
 execution, device-frame advancement and shutdown. It also decodes a synthetic
 WAV and an owned game MP3 to nonzero PCM. These use SDL's dummy driver;
-audible output, pause/resume and broader playback control remain unverified.
+pause/resume with stable paused time, seeking, volume/pan readback and shutdown
+also pass through original FMOD. Actual audible output remains unverified.
 
 The VGUI fixture executes the original App/Label/SurfaceBase constructors,
 font measurement and glyph extraction, then records native drawing calls.
@@ -113,8 +116,11 @@ Guest globals/entvars/edicts are 172/676/804 bytes; native layouts differ.
 Entity pointers, string IDs, cvars, traces, private data and delta encoders
 are explicitly marshaled. Viewmodel/weaponmodel fields are string IDs despite
 being declared as integers. String conversion caches validate native pool
-reuse, and global trace writes return to the engine. Many callbacks still
-synchronize broad entity state and require further profiling.
+reuse, and global trace writes return to the engine. Native edict-pool
+replacement and growth retain stable guest addresses. Snapshots skip unchanged
+records; audited scalar queries avoid full synchronization. Sphere searches
+publish only the bounds the pinned engine reads. Remaining broad boundaries
+still require profiling.
 
 Client Initialize copies 135 DWORDs. Native trampolines represent guest
 callbacks. Nested API tables remain guest tables; missing methods fail by
@@ -124,6 +130,11 @@ cached and invalidated at map boundaries. BSP graph pointers that have no
 adapter remain guarded opaque tokens. Temporary entities preserve list heads
 across nested allocations, and studio matrices synchronize in both directions.
 Fixtures cover entity-array replacement, mutable writes and callback lifetimes.
+Inactive temporary-entity bodies are excluded using the actual free/active
+lists, while their links remain synchronized. Allocations during an update
+reenter the active set before entity data are published. Studio drawing
+synchronizes its current entity, matrices and lights; event callbacks retain
+the complete boundary for reentrant gameplay.
 
 The engine has a small local patch adding `-hidden` for tests. Session staging
 replaces Mach-O files atomically and takes a lock shared with engine tests, so
@@ -140,6 +151,44 @@ The server's `playaudio` command is routed to the original client's `PlayMP3`
 message handler. Bare names resolve under `sound/music/` with looping enabled;
 explicit paths are preserved. The original FMOD code retains stream ownership.
 
+## v3 compatibility repair
+
+`runtime/v3_lifetime.inc` repairs an expired muzzle-flash sprite reference in
+the pinned v3 server. `CFuncTank::Fire` stores the sprite at object offset
+`0x22c`; its timed removal leaves that raw reference behind. In `c2a2d`, the
+next mounted-weapon Think accessed the recycled allocation as a sprite and
+crashed. The native free callback now clears matching references on the four
+identified tank classes before releasing the sprite. A regression fixture
+checks live/unrelated references and immediate allocation reuse. Extended
+combat now passes the previous crash point and exits normally; its separate
+combat save test still needs a confirmed invulnerability command after signon.
+
+This is an explicit compatibility repair, not a claim that the original code
+already handled this lifetime. Executable image bytes and translated
+instructions remain unchanged.
+
+## Local app and broad smoke tests
+
+The Swift/AppKit launcher includes campaign/menu/showcase/latest-save modes,
+display and difficulty settings, original binding help, save/log shortcuts,
+installation locking and fatal-error recovery. Packaging copies owned data
+into a separate installation and retains settings/saves on rebuild. Mach-O
+dependencies are bundled with loader-relative paths and ad-hoc signatures;
+the prepared original images remain data for the ARM64 runtime.
+
+Five packaged-launcher stages pass: menu startup, campaign hub with capture,
+showcase save, fresh-process reload and the first tram landmark transition.
+Loaded-library checks verify bundled SDL2/SDL3 and engine dependencies without
+Homebrew runtime paths. These checks must be repeated after runtime changes.
+
+`tests/test_map_matrix.py` records activation, 35 initial frames, capture and
+normal shutdown for all 134 shipped BHL maps. Reports are keyed by staged
+binary hashes; a rebuilt runtime cannot reuse earlier passes. The initial
+sweep passed 57 maps before finding the tank-sprite fault. The fixed runtime's
+full sweep is in progress. `tests/test_weapon_matrix.py` retains separate
+weapon-batch logs. These are smoke checks, not complete campaign/script,
+weapon-hit, animation or enemy-behavior validation.
+
 ## Work required for the complete conversion
 
 1. **Audio:** audit overlapping buffer locks, reference lifetimes and remaining
@@ -154,7 +203,7 @@ explicit paths are preserved. The original FMOD code retains stream ownership.
    input prediction. Compare real rendering and combat against original behavior.
 4. **Server/player:** finish movement/collision, connections, data packing,
    visibility and remaining callbacks. Audit guest writes to globals and
-   invalidate model-copy caches across level transitions.
+   continue checking model/private-data lifetimes across level transitions.
 5. **Saves:** extend the working serializer and showcase reload checks to
    quicksave/load, checkpoints, adjacent levels, fresh process loads and
    repeated save cycles. Compare restored behavior with the original.
@@ -165,8 +214,9 @@ explicit paths are preserved. The original FMOD code retains stream ownership.
 7. **Performance:** profile real frames, then optimize synchronization and
    audit string/file-copy lifetimes. No performance claim is established.
 8. **QA/packaging:** exercise every v3 weapon/enemy, campaign scripts and
-   transitions. Then create the native Mac launcher and isolated user
-   data/saves. Nightly publication follows local acceptance separately.
+   transitions. Finish the full map sweep and repeat packaged-launcher tests
+   against the final runtime. Nightly publication follows local acceptance
+   separately.
 
 Two map warnings name `ammo_chaingunclip` and `item_glow`; neither is exported
 by the original server. Check original behavior before adding aliases.

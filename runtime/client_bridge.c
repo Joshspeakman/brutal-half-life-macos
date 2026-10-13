@@ -31,6 +31,7 @@ struct r_studio_interface_s;
 struct engine_studio_api_s;
 static void entities_pull(void);
 static void entities_push(void);
+static void temp_entities_prepare(int guest);
 static void effects_pull(void);
 static void effects_push(void);
 static void studio_pull(void);
@@ -99,8 +100,15 @@ static uint32_t light_guest(dlight_t *);
 static uint32_t particle_guest(particle_t *);
 static uint32_t particle_alloc(uint32_t);
 static uint32_t beam_guest(BEAM *);
+static uint32_t temp_custom_alloc(const float *,model_t *,int,uint32_t);
+static void projectile_hit(unsigned,TEMPENTITY *,pmtrace_t *);
+static void tracer_death(unsigned,particle_t *);
+static void (*projectile_callback(uint32_t))(TEMPENTITY *,pmtrace_t *);
+static void (*tracer_callback(uint32_t))(particle_t *);
 static TEMPENTITY *temp_host(uint32_t);
 static uint32_t event_physent(physent_t *);
+static void event_trace_ext(Ctx *);
+static void playback_event(Ctx *,int);
 static void client_dispatch(Ctx *,unsigned);
 #include "client_engine_abi.h"
 #include "client_subtables.h"
@@ -128,7 +136,7 @@ typedef struct BhlClientEntity {
 _Static_assert(sizeof(entity_state_t)==340,"entity state ABI");
 _Static_assert(offsetof(BhlClientEntity,model)==2964,"guest client entity prefix");
 _Static_assert(sizeof(BhlClientEntity)==3000,"guest client entity size");
-typedef struct EntityCopy {cl_entity_t *host;uint32_t guest;int source,index,active;struct EntityCopy *next;} EntityCopy;
+typedef struct EntityCopy {cl_entity_t *host;uint32_t guest;int source,index,active;uint32_t epoch;int valid;cl_entity_t host_snapshot;BhlClientEntity guest_snapshot;struct EntityCopy *next;} EntityCopy;
 static EntityCopy *entities;
 typedef struct TextCopy {client_textmessage_t *host;uint32_t guest,name,message;struct TextCopy *next;} TextCopy;
 static TextCopy *texts;
@@ -153,19 +161,28 @@ static void entity_pull(EntityCopy *p)
     else if(p->source==2)p->host=engine.GetEntityByIndex(p->index);
     if(!p->host||!p->active)return;
     cl_entity_t *h=p->host;
+    if(p->valid&&p->epoch==model_epoch&&!memcmp(&p->host_snapshot,h,sizeof *h)){
+        /* A model descriptor can change behind an unchanged entity pointer. */
+        if(h->model)model_guest(h->model);
+        return;
+    }
     BhlClientEntity *g=(void*)(G_MEM+p->guest);memcpy(g,h,offsetof(BhlClientEntity,model));
     g->model=model_guest(h->model);g->efrag=model_opaque(h->efrag,"efrag");g->topnode=model_opaque(h->topnode,"topnode");
     g->syncbase=h->syncbase;g->visframe=h->visframe;g->cvFloorColor=h->cvFloorColor;
+    p->host_snapshot=*h;p->guest_snapshot=*g;p->epoch=model_epoch;p->valid=1;
 }
 static void entity_push(EntityCopy *p)
 {
     if(!p->host||!p->active)return;
-    cl_entity_t *h=p->host;BhlClientEntity *g=(void*)(G_MEM+p->guest);memcpy(h,g,offsetof(BhlClientEntity,model));
+    cl_entity_t *h=p->host;BhlClientEntity *g=(void*)(G_MEM+p->guest);
+    if(p->valid&&!memcmp(&p->guest_snapshot,g,sizeof *g))return;
+    memcpy(h,g,offsetof(BhlClientEntity,model));
     h->model=model_host(g->model);h->efrag=(void*)model_host_data(g->efrag);h->topnode=(void*)model_host_data(g->topnode);
     h->syncbase=g->syncbase;h->visframe=g->visframe;h->cvFloorColor=g->cvFloorColor;
+    p->host_snapshot=*h;p->guest_snapshot=*g;p->epoch=model_epoch;p->valid=1;
 }
 static void entities_pull(void){studio_pull();effects_pull();for(EntityCopy *p=entities;p;p=p->next)entity_pull(p);}
-static void entities_push(void){for(EntityCopy *p=entities;p;p=p->next)entity_push(p);effects_push();studio_push();}
+static void entities_push(void){temp_entities_prepare(1);for(EntityCopy *p=entities;p;p=p->next)entity_push(p);effects_push();studio_push();}
 static void entities_end(void){for(EntityCopy *p=entities;p;p=p->next)if(!p->source)p->active=0;}
 static uint32_t entity_copy(cl_entity_t *h)
 {
@@ -178,6 +195,14 @@ static uint32_t entity_copy(cl_entity_t *h)
     p->active=1;
     entity_pull(p);return p->guest;
 }
+/* An accessor does not change the engine's entity. If it already has a live
+   mirror, return that identity without round-tripping every other entity. */
+static uint32_t entity_reference(cl_entity_t *h)
+{
+    if(!h)return 0;
+    for(EntityCopy *p=entities;p;p=p->next)if(p->host==h&&p->active)return p->guest;
+    return entity_copy(h);
+}
 static cl_entity_t *entity_host(uint32_t g)
 {
     if(!g)return NULL;for(EntityCopy *p=entities;p;p=p->next)if(p->guest==g){if(!p->active)client_missing("entity used after callback lifetime");entity_push(p);return p->host;}
@@ -187,11 +212,34 @@ static cl_entity_t *entity_host(uint32_t g)
 }
 #include "effects_bridge.inc"
 #include "studio_bridge.inc"
+static void playback_event(Ctx *c,int event_api)
+{
+    /* Pinned CL_PlaybackEvent does not read pInvoker: client events always
+       use cl.playernum + 1. Its server counterpart has a separate adapter. */
+    if(event_api)engine.pEventAPI->EV_PlaybackEvent(A(0),NULL,A(2),rt_rf32(G_MEM,c->esp+16),(float*)gs(A(4)),(float*)gs(A(5)),rt_rf32(G_MEM,c->esp+28),rt_rf32(G_MEM,c->esp+32),A(8),A(9),A(10),A(11));
+    else engine.pfnPlaybackEvent(A(0),NULL,A(2),rt_rf32(G_MEM,c->esp+16),(float*)gs(A(4)),(float*)gs(A(5)),rt_rf32(G_MEM,c->esp+28),rt_rf32(G_MEM,c->esp+32),A(8),A(9),A(10),A(11));
+}
 static void client_dispatch(Ctx *c,unsigned slot)
 {
+    switch(slot){
+    case BHL_CL_GetEntityByIndex:RAW_RET(entity_reference(engine.GetEntityByIndex(A(0))));
+    case BHL_CL_GetLocalPlayer:RAW_RET(entity_reference(engine.GetLocalPlayer()));
+    case BHL_CL_GetViewModel:RAW_RET(entity_reference(engine.GetViewModel()));
+    /* These model lookups and movement queries use the engine's model table
+       and prepared physents, not mutable cl_entity/tempent mirrors. */
+    case BHL_CL_CL_LoadModel:RAW_RET(model_guest(engine.CL_LoadModel(gs(A(0)),(int*)gs(A(1)))));
+    case BHL_CL_pfnGetModelByIndex:RAW_RET(model_guest(engine.pfnGetModelByIndex(A(0))));
+    case BHL_CL_GetSpritePointer:RAW_RET(model_guest(engine.GetSpritePointer(A(0))));
+    case BHL_CL_pfnGetCvarPointer:RAW_RET(cvar_copy(engine.pfnGetCvarPointer(gs(A(0)))));
+    case BHL_CL_PM_TraceLine:{static uint32_t result;pmtrace_t *h=engine.PM_TraceLine((float*)gs(A(0)),(float*)gs(A(1)),A(2),A(3),A(4));if(!h)RAW_RET(0);if(!result)result=bhl_heap_alloc(sizeof *h,1);memcpy(G_MEM+result,h,sizeof *h);RAW_RET(result);}
+#include "client_independent_callbacks.h"
+    default:break;
+    }
     entities_push();
     if(getenv("BHL_BRIDGE_TRACE"))fprintf(stderr,"client engine %s\n",client_engine_names[slot]);
     switch(slot){
+    case BHL_CL_pfnPlaybackEvent:playback_event(c,0);RET(0);
+    case BHL_CL_PM_TraceLine:{static uint32_t result;pmtrace_t *h=engine.PM_TraceLine((float*)gs(A(0)),(float*)gs(A(1)),A(2),A(3),A(4));if(!h)RET(0);if(!result)result=bhl_heap_alloc(sizeof *h,1);memcpy(G_MEM+result,h,sizeof *h);RET(result);}
     case BHL_CL_Con_Printf:case BHL_CL_Con_DPrintf:{char text[8192];format_guest(text,gs(A(0)),c->esp+8);if(slot==BHL_CL_Con_Printf)engine.Con_Printf("%s",text);else engine.Con_DPrintf("%s",text);RET(0);}
     case BHL_CL_Con_NPrintf:{char text[8192];format_guest(text,gs(A(1)),c->esp+12);engine.Con_NPrintf(A(0),"%s",text);RET(0);}
     case BHL_CL_pfnRegisterVariable:RET(cvar_copy(engine.pfnRegisterVariable(gs(A(0)),gs(A(1)),A(2))));
@@ -282,6 +330,15 @@ EXPORT void V_CalcRefdef(ref_params_t *params)
     bhl_heap_free(cmd);bhl_heap_free(vars);bhl_heap_free(p);
 }
 EXPORT void HUD_VoiceStatus(int index,qboolean talking){uint32_t a[]={index,talking};invoke("HUD_VoiceStatus",a,2);}
+EXPORT int HUD_ConnectionlessPacket(const struct netadr_s *from,const char *arguments,char *response,int *size)
+{
+    _Static_assert(sizeof(netadr_t)==20,"network address ABI");
+    if(!size||*size<0||*size>4*1024*1024)client_missing("connectionless response capacity");int capacity=*size;
+    uint32_t address=copy_bytes(from,sizeof *from),text=copy_string(arguments),data=bhl_heap_alloc(capacity?capacity:1,1),length=bhl_heap_alloc(4,1);
+    rt_w32(G_MEM,length,capacity);uint32_t args[]={address,text,data,length};int r=invoke("HUD_ConnectionlessPacket",args,4);unsigned written=rt_r32(G_MEM,length);
+    if(written>(unsigned)capacity)client_missing("connectionless response overflow");if(written)memcpy(response,G_MEM+data,written);*size=written;
+    bhl_heap_free(address);bhl_heap_free(text);bhl_heap_free(data);bhl_heap_free(length);return r;
+}
 EXPORT int HUD_Key_Event(int event,int key,const char *binding)
 {uint32_t p=copy_string(binding),a[]={event,key,p};int r=invoke("HUD_Key_Event",a,3);bhl_heap_free(p);return r;}
 EXPORT char HUD_PlayerMoveTexture(char *name)
@@ -338,6 +395,11 @@ static void pm_dispatch(Ctx *,unsigned);
 #define BHL_PM_NAMESPACE "client-movement!"
 #include "guest_movement.h"
 #include "movement_bridge.inc"
+static void event_trace_ext(Ctx *c)
+{
+    uint32_t previous=ignore_function;ignore_function=A(3);
+    engine.pEventAPI->EV_PlayerTraceExt((float*)gs(A(0)),(float*)gs(A(1)),A(2),A(3)?movement_ignore:NULL,(pmtrace_t*)gs(A(4)));ignore_function=previous;
+}
 static uint32_t event_physent(physent_t *host)
 {
     typedef struct PhysCopy {physent_t *host;uint32_t guest;struct PhysCopy *next;} PhysCopy;

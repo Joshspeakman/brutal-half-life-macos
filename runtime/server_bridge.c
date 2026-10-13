@@ -39,6 +39,9 @@ static edict_t *edict_base;
 static uint32_t guest_edicts, guest_strings, string_used=1;
 static uint32_t *private_data;
 static unsigned edict_capacity;
+typedef struct EntitySnapshot {int valid;entvars_t host;BhlEntvars guest;} EntitySnapshot;
+static EntitySnapshot *entity_snapshots;
+#include "v3_lifetime.inc"
 #define STRING_CAPACITY (4*1024*1024u)
 typedef struct StringEntry { uint32_t offset; struct StringEntry *next; } StringEntry;
 static StringEntry *strings[4096];
@@ -47,14 +50,19 @@ static StringMap *host_strings[4096],*guest_string_ids[4096];
 static unsigned string_bucket(uint32_t id){return (id*2654435761u)>>20;}
 static void ensure_entities(void)
 {
-    if(guest_edicts)return;
     if(host_globals->maxEntities<1||host_globals->maxEntities>8192)abort();
     edict_capacity=(unsigned)host_globals->maxEntities;
-    edict_base=engine.pfnPEntityOfEntIndexAllEntities(0);if(!edict_base)abort();
-    guest_edicts=bhl_heap_alloc(edict_capacity*sizeof(BhlEdict),1);
-    private_data=calloc(edict_capacity,sizeof *private_data);
+    edict_t *base=engine.pfnPEntityOfEntIndexAllEntities(0);if(!base)abort();
+    if(base!=edict_base&&entity_snapshots)memset(entity_snapshots,0,8192*sizeof *entity_snapshots);
+    edict_base=base;
+    if(guest_edicts)return;
+    /* Native pools can move or grow on a new game. Guest entity addresses
+       remain stable, while host pointers resolve against the current pool. */
+    guest_edicts=bhl_heap_alloc(8192*sizeof(BhlEdict),1);
+    private_data=calloc(8192,sizeof *private_data);
+    entity_snapshots=calloc(8192,sizeof *entity_snapshots);
     guest_strings=bhl_heap_alloc(STRING_CAPACITY,1);
-    if(!guest_edicts||!private_data||!guest_strings)abort();
+    if(!guest_edicts||!private_data||!guest_strings||!entity_snapshots)abort();
 }
 static uint32_t guest_edict(const edict_t *host)
 {
@@ -89,6 +97,18 @@ static int host_string(uint32_t id)
     else{m=calloc(1,sizeof *m);if(!m)abort();m->guest=id;m->next=guest_string_ids[slot];guest_string_ids[slot]=m;}
     m->host=engine.pfnAllocString(text);return m->host;
 }
+static int entity_strings_unchanged(const BhlEntvars *g,const entvars_t *h)
+{
+    /* String IDs can remain equal when the engine reuses its string pool.
+       A byte-identical entvars record alone is not sufficient evidence. */
+#define SAME_STRING(field) do{if(h->field){const char *text=engine.pfnSzFromIndex(h->field);if(!text||strcmp((char*)G_MEM+(uint32_t)(guest_strings+g->field),text))return 0;}}while(0)
+    SAME_STRING(classname);SAME_STRING(globalname);SAME_STRING(model);
+    SAME_STRING(viewmodel);SAME_STRING(weaponmodel);SAME_STRING(target);
+    SAME_STRING(targetname);SAME_STRING(netname);SAME_STRING(message);
+    SAME_STRING(noise);SAME_STRING(noise1);SAME_STRING(noise2);SAME_STRING(noise3);
+#undef SAME_STRING
+    return 1;
+}
 static void pull_entities(void)
 {
     ensure_entities();
@@ -98,7 +118,10 @@ static void pull_entities(void)
         memcpy(g->leafnums,h->leafnums16,sizeof g->leafnums);g->freetime=h->freetime;
         g->pvPrivateData=h->pvPrivateData?private_data[i]:0;
         if(h->free&&!h->pvPrivateData)continue;
+        EntitySnapshot *snapshot=&entity_snapshots[i];
+        if(snapshot->valid&&!memcmp(&snapshot->host,&h->v,sizeof h->v)&&entity_strings_unchanged(&snapshot->guest,&h->v))continue;
         copy_entvars_to_guest(&g->v,&h->v);
+        snapshot->host=h->v;snapshot->guest=g->v;snapshot->valid=1;
     }
 }
 static void push_entities(void)
@@ -107,23 +130,21 @@ static void push_entities(void)
     for(unsigned i=0;i<edict_capacity;i++){
         BhlEdict *g=(void*)(G_MEM+guest_edicts+i*sizeof *g);edict_t *h=edict_base+i;
         if(h->free&&!h->pvPrivateData)continue;
+        EntitySnapshot *snapshot=&entity_snapshots[i];
+        if(snapshot->valid&&!memcmp(&snapshot->guest,&g->v,sizeof g->v))continue;
         copy_entvars_to_host(&h->v,&g->v);
+        snapshot->host=h->v;snapshot->guest=g->v;snapshot->valid=1;
     }
 }
 
 static uint32_t encoder_functions[3];
 static struct delta_s *active_delta;
 static uint32_t visibility_buffers[2];
-typedef struct ModelCopy { const void *host; uint32_t guest; struct ModelCopy *next; } ModelCopy;
-static ModelCopy *model_copies;
 static uint32_t model_copy(void *host)
 {
-    if(!host)return 0;
-    for(ModelCopy *m=model_copies;m;m=m->next)if(m->host==host)return m->guest;
-    uint32_t id,version,length;memcpy(&id,host,4);memcpy(&version,(char*)host+4,4);memcpy(&length,(char*)host+72,4);
-    if(id!=0x54534449u||version!=10||length<244||length>32*1024*1024){fprintf(stderr,"BHL native bridge: unexpected studio model layout\n");abort();}
-    ModelCopy *m=calloc(1,sizeof *m);if(!m)abort();m->host=host;m->guest=bhl_heap_alloc(length,0);if(!m->guest)abort();
-    memcpy(G_MEM+m->guest,host,length);m->next=model_copies;model_copies=m;return m->guest;
+    /* Share the epoch-aware studio cache; a new level can reuse an address
+       for different model data. */
+    return studio_data(host);
 }
 static void trace_to_guest(uint32_t address,const TraceResult *t)
 {
@@ -232,9 +253,58 @@ static void (*commands[])(void)={command_0,command_1,command_2,command_3,command
     command_24,command_25,command_26,command_27,command_28,command_29,command_30,command_31};
 #define A(n) rt_r32(G_MEM,c->esp+4+4*(n))
 #define RET(v) do{uint32_t result_=(uint32_t)(v);sync_basic_globals();c->eax=result_;c->esp+=4;return;}while(0)
+#define RAW_RET(v) do{c->eax=(uint32_t)(v);c->esp+=4;return;}while(0)
 static void engine_dispatch(Ctx *c,unsigned slot)
 {
     if(getenv("BHL_BRIDGE_TRACE"))fprintf(stderr,"engine %s\n",engine_names[slot]);
+    /* These APIs cannot observe edicts or globals. Avoid copying the entire
+       world when original AI asks for a random value or reads a cvar. */
+    switch(slot){
+    case BHL_ENG_pfnSzFromIndex:RAW_RET(guest_strings+A(0));
+    case BHL_ENG_pfnGetVarsOfEnt:RAW_RET(A(0)?A(0)+offsetof(BhlEdict,v):0);
+    case BHL_ENG_pfnFindEntityByVars:RAW_RET(A(0)?A(0)-offsetof(BhlEdict,v):0);
+    case BHL_ENG_pfnIndexOfEdict:RAW_RET(engine.pfnIndexOfEdict(host_edict(A(0))));
+    case BHL_ENG_pfnPEntityOfEntIndex:RAW_RET(guest_edict(engine.pfnPEntityOfEntIndex(A(0))));
+    case BHL_ENG_pfnPEntityOfEntOffset:RAW_RET(guest_edicts+A(0));
+    case BHL_ENG_pfnEntOffsetOfPEntity:RAW_RET(A(0)-guest_edicts);
+    case BHL_ENG_pfnAllocString:RAW_RET(guest_string(engine.pfnAllocString(gs(A(0)))));
+    case BHL_ENG_pfnModelIndex:RAW_RET(engine.pfnModelIndex(gs(A(0))));
+    case BHL_ENG_pfnModelFrames:RAW_RET(engine.pfnModelFrames(A(0)));
+    case BHL_ENG_pfnVecToYaw:FPUSH(engine.pfnVecToYaw((float*)gs(A(0))));RAW_RET(0);
+    case BHL_ENG_pfnVecToAngles:engine.pfnVecToAngles((float*)gs(A(0)),(float*)gs(A(1)));RAW_RET(0);
+    case BHL_ENG_pfnAngleVectors:engine.pfnAngleVectors((float*)gs(A(0)),(float*)gs(A(1)),(float*)gs(A(2)),(float*)gs(A(3)));RAW_RET(0);
+    case BHL_ENG_pfnTime:FPUSH(engine.pfnTime());RAW_RET(0);
+    case BHL_ENG_pfnWriteByte:engine.pfnWriteByte(A(0));RAW_RET(0);
+    case BHL_ENG_pfnWriteChar:engine.pfnWriteChar(A(0));RAW_RET(0);
+    case BHL_ENG_pfnWriteShort:engine.pfnWriteShort(A(0));RAW_RET(0);
+    case BHL_ENG_pfnWriteLong:engine.pfnWriteLong(A(0));RAW_RET(0);
+    case BHL_ENG_pfnWriteAngle:engine.pfnWriteAngle(rt_rf32(G_MEM,c->esp+4));RAW_RET(0);
+    case BHL_ENG_pfnWriteCoord:engine.pfnWriteCoord(rt_rf32(G_MEM,c->esp+4));RAW_RET(0);
+    case BHL_ENG_pfnWriteString:engine.pfnWriteString(gs(A(0)));RAW_RET(0);
+    case BHL_ENG_pfnWriteEntity:engine.pfnWriteEntity(A(0));RAW_RET(0);
+    case BHL_ENG_pfnFindEntityInSphere:{
+        /* Pinned sv_game.c only reads absmin/absmax from entvars here.
+           Free/private/client validity stays engine-owned. Preserve native
+           search semantics while publishing only the fields it consumes. */
+        ensure_entities();
+        for(unsigned i=0;i<edict_capacity;i++)if(!edict_base[i].free){
+            BhlEdict *g=(void*)(G_MEM+guest_edicts+i*sizeof *g);
+            memcpy(edict_base[i].v.absmin,g->v.absmin,sizeof(vec3_t));
+            memcpy(edict_base[i].v.absmax,g->v.absmax,sizeof(vec3_t));
+        }
+        RAW_RET(guest_edict(engine.pfnFindEntityInSphere(host_edict(A(0)),(float*)gs(A(1)),rt_rf32(G_MEM,c->esp+12))));
+    }
+    case BHL_ENG_pfnRandomLong:RAW_RET(engine.pfnRandomLong((int32_t)A(0),(int32_t)A(1)));
+    case BHL_ENG_pfnRandomFloat:FPUSH(engine.pfnRandomFloat(rt_rf32(G_MEM,c->esp+4),rt_rf32(G_MEM,c->esp+8)));RAW_RET(0);
+    case BHL_ENG_pfnCVarGetFloat:FPUSH(engine.pfnCVarGetFloat(gs(A(0))));RAW_RET(0);
+    case BHL_ENG_pfnCVarGetString:RAW_RET(copy_string(engine.pfnCVarGetString(gs(A(0)))));
+    case BHL_ENG_pfnIsDedicatedServer:RAW_RET(engine.pfnIsDedicatedServer());
+    case BHL_ENG_pfnCRC32_Init:engine.pfnCRC32_Init((CRC32_t*)gs(A(0)));RAW_RET(0);
+    case BHL_ENG_pfnCRC32_ProcessBuffer:engine.pfnCRC32_ProcessBuffer((CRC32_t*)gs(A(0)),gs(A(1)),A(2));RAW_RET(0);
+    case BHL_ENG_pfnCRC32_ProcessByte:engine.pfnCRC32_ProcessByte((CRC32_t*)gs(A(0)),A(1));RAW_RET(0);
+    case BHL_ENG_pfnCRC32_Final:RAW_RET(engine.pfnCRC32_Final(A(0)));
+    default:break;
+    }
     push_entities();push_globals();push_info();
     switch(slot){
     case BHL_ENG_pfnFunctionFromName:RET(save_function_address(gs(A(0))));
@@ -456,6 +526,7 @@ static uint32_t new_call(unsigned slot,const uint32_t *args,unsigned count)
 static void free_private(edict_t *entity)
 {
     uint32_t arg=guest_edict(entity);unsigned i=(unsigned)(entity-edict_base);
+    v3_retire_sprite(private_data[i]);
     new_call(0,&arg,1);if(private_data[i])bhl_heap_free(private_data[i]);private_data[i]=0;
 }
 static void game_shutdown(void){new_call(1,NULL,0);}

@@ -24,9 +24,13 @@ def main():
     ap.add_argument('--save-load',action='store_true',help='Save, reload, then quit this isolated test session')
     ap.add_argument('--weapons',nargs='+',help='Exercise primary/secondary fire and reload for these weapon class names')
     ap.add_argument('--music',action='store_true',help='Request this map music through the original PlayMP3 handler')
+    ap.add_argument('--god',action='store_true',help='Keep the player alive during unattended combat/save checks')
+    ap.add_argument('--quit-after-frames',type=int,help='Finish a bounded map activation/capture run normally')
     args=ap.parse_args()
     session_lock=(ROOT/'work/session/.session.lock').open('a')
     fcntl.flock(session_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    save_file=ROOT/'work/session/bhl/save/native-acceptance.sav'
+    if args.save_load:save_file.unlink(missing_ok=True)
     log=ROOT/'work/reports/client-engine.log'
     # Earlier startup failures can make the engine save its own defaults before
     # it ever executes the mod's config. Always test the shipped v3 settings.
@@ -36,10 +40,12 @@ def main():
     if args.weapons:environment['BHL_COMBAT_TRACE']='1'
     command=['./xash3d','-game','bhl','-ref',args.renderer,'-hidden','-windowed','-width','800','-height','600','-nomouse','-dev','3','-noip','-noip6','-nomaster','-nowriteconfig','-console','+sv_lan','1','+map',args.map]
     capture=ROOT/'work/session/bhl/scrshots/native-acceptance.png'
-    if args.capture or args.save_load or args.weapons or args.music:
+    if args.capture or args.save_load or args.weapons or args.music or args.quit_after_frames:
         capture.unlink(missing_ok=True)
-        script='wait\n'*args.capture_frames
-        if args.capture:script+='snapshot scrshots/native-acceptance.png\n'
+        # Startup exec runs before signon; forwarding "god" before the
+        # client connects is rejected as an unknown command by the engine.
+        script=('wait\n'*25+'sv_cheats 1\ngod\n' if args.god else '')+'wait\n'*(args.quit_after_frames or args.capture_frames)
+        if args.capture:script+='snapshot scrshots/native-acceptance.png\n'+'wait\n'*3
         if args.music:
             if not re.fullmatch(r'[A-Za-z0-9_-]+',args.map):ap.error('Map name cannot form a music path')
             script+=f'playaudio {args.map}.mp3\n'+'wait\n'*5
@@ -50,7 +56,7 @@ def main():
                 script+=f'give {weapon}\n{weapon}\n'+'wait\n'*5+'+attack\n'+'wait\n'*8+'-attack\n'+'wait\n'*3+'+attack2\n'+'wait\n'*5+'-attack2\n+reload\n'+'wait\n'*5+'-reload\n'
             script+='echo BHL_ACCEPTANCE_COMBAT_FINISHED\n'
         if args.save_load:script+='save native-acceptance\n'+'wait\n'*5+'load native-acceptance\n'+'wait\n'*20+'echo BHL_ACCEPTANCE_SAVE_LOAD_FINISHED\nquit\n'
-        elif args.weapons or args.music:script+='quit\n'
+        elif args.weapons or args.music or args.quit_after_frames:script+='echo BHL_ACCEPTANCE_MAP_FINISHED\nquit\n'
         (ROOT/'work/session/bhl/native-acceptance.cfg').write_text(script)
         command+=['+exec','native-acceptance.cfg']
     timeout=False
@@ -71,13 +77,16 @@ def main():
     }.items()}
     failures=[line for line in text.splitlines() if re.search('BHL.*(unimplemented|failed|not implemented)|Crash:|Xash Error:|BHL native loader:|Host_Error:',line)]
     if args.save_load:
+        stages['fresh_save_written']=save_file.exists() and save_file.stat().st_size>0
         stages['map_reactivated']=text.count('BHL v3 ServerActivate completed')>=2
         stages['save_load_finished']='BHL_ACCEPTANCE_SAVE_LOAD_FINISHED' in text and code==0 and not timeout
     if args.weapons:
         stages['combat_script_finished']='BHL_ACCEPTANCE_COMBAT_FINISHED' in text and code==0 and not timeout
         stages['weapon_event_executed']='BHL original weapon event:' in text
     if args.music:stages['original_music_requested']='BHL original map audio requested:' in text
-    report=dict(stages=stages,failures=failures,returncode=code,timeout=timeout,renderer=args.renderer,map=args.map,passed=all(stages.values()) and not failures and (timeout or code==0) and (not args.capture or capture.exists()),capture=str(capture.relative_to(ROOT)) if args.capture and capture.exists() else None,rendering_tested=False,gameplay_validated=False)
+    if args.god:stages['god_enabled']='godmode on' in text.lower()
+    if args.quit_after_frames and not args.save_load:stages['bounded_map_finished']='BHL_ACCEPTANCE_MAP_FINISHED' in text and code==0 and not timeout
+    report=dict(stages=stages,failures=failures,returncode=code,timeout=timeout,renderer=args.renderer,map=args.map,requested_weapons=args.weapons or [],weapon_events=sorted(set(re.findall(r'BHL original weapon event: (\S+)',text))),music_requested=args.music,save_load_requested=args.save_load,passed=all(stages.values()) and not failures and (timeout or code==0) and (not args.capture or capture.exists()),capture=str(capture.relative_to(ROOT)) if args.capture and capture.exists() else None,rendering_tested=False,gameplay_validated=False)
     log.with_suffix('.json').write_text(json.dumps(report,indent=2)+'\n')
     print(json.dumps(report,indent=2))
     raise SystemExit(not report['passed'])
