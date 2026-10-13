@@ -33,6 +33,6 @@ BHL_VALVE="$(cd "$BHL_VALVE" && pwd)"
 [[ "$BHL_DATA" = /* ]] || BHL_DATA="$PWD/$BHL_DATA"
 cd "$BHL_PROJECT"
 ./bootstrap.sh "$BHL_ARCHIVE"
-.venv/bin/python tools/build_project.py --archive "$BHL_ARCHIVE" --valve "$BHL_VALVE" "${BHL_CHECK[@]}"
+.venv/bin/python tools/build_project.py --archive "$BHL_ARCHIVE" --valve "$BHL_VALVE" ${BHL_CHECK[@]+"${BHL_CHECK[@]}"}
 .venv/bin/python tools/package_app.py --archive "$BHL_ARCHIVE" --valve "$BHL_VALVE" --app "$BHL_APP" --data-dir "$BHL_DATA" --replace
 echo 'Local app built. Open it in Finder to play; no nightly build was published.'
