@@ -34,10 +34,10 @@ static void entity_lazy_begin(void)
     entity_watch_suspend();
     for(EntityCopy *p=entity_accessed;p;p=p->access_next){
         if(p->active&&p->valid&&memcmp(&p->guest_snapshot,G_MEM+p->guest,sizeof p->guest_snapshot)){
-            entity_lazy_materialize();entities_pull();return;
+            bridge_boundary="lazy-begin-native-write";entity_lazy_materialize();entities_pull();return;
         }
     }
-    if(temp_lazy_pending()){entity_lazy_materialize();entities_pull();return;}
+    if(temp_lazy_pending()){bridge_boundary="lazy-begin-temp-pending";entity_lazy_materialize();entities_pull();return;}
     if(!++entity_access_serial)abort();
     entity_access_epoch=entity_access_serial;entity_accessed=NULL;temp_lazy_begin();
     memcpy(entity_pending,entity_registered,sizeof entity_pending);
@@ -49,7 +49,7 @@ static void entity_lazy_materialize(void)
 {
     entity_demand_enabled=0;
     if(!entity_access_epoch)return;
-    BHL_PROFILE("client-lazy-fallback",0);
+    BHL_PROFILE("client-lazy-fallback",0);bridge_fallback("client");
     uint64_t epoch=entity_access_epoch;entity_access_epoch=0;entity_watch_suspend();
     temp_lazy_materialize(epoch);
     /* Accessed mirrors may contain pending original writes. Never pull them
@@ -85,7 +85,7 @@ static void entity_pointer_escape(uint32_t guest)
         if(guest-(p->guest-prefix)<sizeof(BhlClientEntity)+prefix){
             /* gs() does not carry a length or ownership contract. A native
                borrower therefore gets the complete, coherent memory view. */
-            entity_lazy_materialize();return;
+            bridge_boundary=bridge_label("borrowed-entity-pointer");entity_lazy_materialize();return;
         }
     }
 }

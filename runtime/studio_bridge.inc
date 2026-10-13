@@ -15,7 +15,10 @@ static void studio_dispatch(Ctx *,unsigned);
 #include "studio_abi.h"
 static uint32_t studio_buffer(void *host,uint32_t size)
 {
-    if(!host)return 0;StudioBuffer *p=studio_buffers;while(p&&(p->host!=host||p->size!=size))p=p->next;
+    if(!host)return 0;
+    /* Shared renderer storage already lives in guest memory: no mirror. */
+    if((uintptr_t)host-(uintptr_t)G_MEM<0x100000000ull&&(uintptr_t)host-(uintptr_t)G_MEM+size<=0x100000000ull)
+        return (uint32_t)((uintptr_t)host-(uintptr_t)G_MEM);StudioBuffer *p=studio_buffers;while(p&&(p->host!=host||p->size!=size))p=p->next;
     if(!p){p=calloc(1,sizeof *p);if(!p)abort();p->host=host;p->size=size;p->guest=bhl_heap_alloc(size,1);p->next=studio_buffers;studio_buffers=p;}
     memcpy(G_MEM+p->guest,host,size);return p->guest;
 }
@@ -92,7 +95,7 @@ static int studio_events_reenter(void)
 #define STUDIO_RET(v) do{c->eax=(uint32_t)(v);studio_sync(0,complete);c->esp+=4;return;}while(0)
 static void studio_dispatch(Ctx *c,unsigned slot)
 {
-    BHL_PROFILE("client-studio",slot);
+    BHL_PROFILE("client-studio",slot);bridge_boundary=studio_names[slot];
     int complete=slot==BHL_STUDIO_StudioClientEvents&&studio_events_reenter();
     /* Renderer queries cannot observe pending entity/matrix writes. Returning
        those values needs no global mirror synchronization. */
@@ -119,6 +122,9 @@ static void studio_dispatch(Ctx *c,unsigned slot)
     case BHL_STUDIO_GetModelByIndex:RAW_RET(model_guest(studio.GetModelByIndex(A(0))));
     case BHL_STUDIO_GetChromeSprite:RAW_RET(model_guest(studio.GetChromeSprite()));
     case BHL_STUDIO_Mem_Calloc:{uint64_t size=(uint64_t)A(0)*A(1);if(size>UINT32_MAX)RAW_RET(0);RAW_RET(bhl_heap_alloc(size,1));}
+    /* Pinned pfnStudio_Mod_Extradata only returns the model's cached studio
+       header; it reads no entity, light or matrix state. */
+    case BHL_STUDIO_Mod_Extradata:RAW_RET(studio_data(studio.Mod_Extradata(model_host(A(0)))));
     default:break;
     }
     studio_sync(1,complete);if(bridge_trace)fprintf(stderr,"studio %s\n",studio_names[slot]);
@@ -204,9 +210,28 @@ static int studio_draw_player(int flags,entity_state_t *state)
     uint32_t p=copy_bytes(state,sizeof *state),a[]={flags,p};int r=invoke_address(rt_r32(G_MEM,guest_studio_interface+8),a,2);
     memcpy(state,G_MEM+p,sizeof *state);bhl_heap_free(p);return r;
 }
+/* The renderer can use guest storage for its bone and light matrices
+ * (Xash_StudioSetTransformStorageV1). The original client and the native
+ * renderer then share one copy instead of copying 12 KiB in both directions
+ * around every studio call. Engines without the hook keep mirrored buffers. */
+static void studio_share_transforms(void)
+{
+    static uint32_t shared;Dl_info info={0};
+    if(!studio.StudioGetBoneTransform||!dladdr((void*)studio.StudioGetBoneTransform,&info)||!info.dli_fname)return;
+    void *library=dlopen(info.dli_fname,RTLD_LAZY|RTLD_NOLOAD|RTLD_FIRST);if(!library)return;
+    void (*share)(void *,void *)=(void (*)(void *,void *))dlsym(library,"Xash_StudioSetTransformStorageV1");dlclose(library);
+    if(!share)return;
+    /* Page-aligned, so original matrix writes do not share watched pages
+       with entity mirrors allocated later. */
+    const uint32_t bytes=2*128*3*4*4;
+    if(!shared){uint32_t block=bhl_heap_alloc(bytes+2*4096,1);if(!block)abort();shared=(block+4095)&~4095u;
+        fprintf(stderr,"BHL native studio transforms shared with the renderer\n");}
+    /* A reloaded renderer starts with its own storage; share again. */
+    share(G_MEM+shared,G_MEM+shared+bytes/2);
+}
 static int studio_initialize(int version,r_studio_interface_t **out,engine_studio_api_t *api)
 {
-    if(version!=1||!out||!api)return 0;studio=*api;
+    if(version!=1||!out||!api)return 0;studio=*api;studio_share_transforms();
     if(!guest_studio)guest_studio=bhl_heap_alloc(46*4,1);studio_fill(guest_studio);
     uint32_t p=bhl_heap_alloc(4,1),a[]={version,p,guest_studio};int result=invoke("HUD_GetStudioModelInterface",a,3);
     if(result){guest_studio_interface=rt_r32(G_MEM,p);if(!guest_studio_interface||rt_r32(G_MEM,guest_studio_interface)!=1)client_missing("studio interface version");

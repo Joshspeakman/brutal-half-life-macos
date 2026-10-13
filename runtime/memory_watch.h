@@ -13,6 +13,8 @@ void rt_watch_begin(unsigned char *, void (*)(uint32_t), void (*)(void));
 void rt_watch_end(void);
 void rt_watch_materialize(void);
 void rt_watch_access(uint32_t, size_t);
+/* Diagnostic label for the import that requested materialization, if any. */
+extern __thread const char *rt_watch_reason;
 static inline void rt_watch_memory(uint32_t address,size_t size)
 {
 #ifdef RT_MEMORY_WATCH

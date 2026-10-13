@@ -23,9 +23,10 @@ static void server_lazy_page(uint32_t page)
 }
 static void server_lazy_materialize(void)
 {
+    if(server_demand_enabled&&server_call_depth)server_demand_rearm=1;
     server_demand_enabled=0;
     if(!server_access_epoch)return;
-    BHL_PROFILE("server-lazy-fallback",0);
+    BHL_PROFILE("server-lazy-fallback",0);bridge_fallback("server");
     uint64_t epoch=server_access_epoch;server_access_epoch=0;server_watch_suspend();
     if(string_validation_batch||!++string_validation_serial)abort();
     string_validation_batch=string_validation_serial;
@@ -40,7 +41,7 @@ static void server_lazy_begin(void)
     for(unsigned n=0;n<server_access_count;n++){
         unsigned i=server_accessed[n];BhlEdict *g=(void*)(G_MEM+guest_edicts+i*sizeof *g);
         if(i<edict_capacity&&!edict_base[i].free&&memcmp(&entity_snapshots[i].guest,&g->v,sizeof g->v)){
-            server_lazy_materialize();pull_entities();return;
+            bridge_boundary="lazy-begin-native-write";server_lazy_materialize();pull_entities();return;
         }
     }
     if(!++server_access_serial)abort();server_access_epoch=server_access_serial;server_access_count=0;

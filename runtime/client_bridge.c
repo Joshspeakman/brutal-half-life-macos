@@ -344,7 +344,7 @@ static void playback_event(Ctx *c,int event_api)
 }
 static void client_dispatch(Ctx *c,unsigned slot)
 {
-    BHL_PROFILE("client-engine",slot);
+    BHL_PROFILE("client-engine",slot);bridge_boundary=client_engine_names[slot];
     switch(slot){
     case BHL_CL_GetEntityByIndex:RAW_RET(entity_reference(engine.GetEntityByIndex(A(0))));
     case BHL_CL_GetLocalPlayer:RAW_RET(entity_reference(engine.GetLocalPlayer()));

@@ -49,7 +49,9 @@ def main():
                 'changelevel2 rtcw1a w1tw1alm\nwait 180\nsave native-rtcw\nwait 10\nload native-rtcw\nwait 120\n'+
                 'changelevel2 rtcw1 w1tw1alm\nwait 180\necho BHL_PACKAGE_RTCW\nquit\n',
         'combat': 'map c2a2d\n'+wait*30+'sv_cheats 1\ngod\n'+wait*200+'save native-tank\n'+wait*5+'load native-tank\n'+wait*40+'echo BHL_PACKAGE_COMBAT\nquit\n',
-        'movement': 'map _zoo\n'+wait*35+'viewpos\n+forward\n'+wait*30+'-forward\n'+wait*3+'viewpos\n+jump\n'+wait*5+'-jump\nviewpos\n'+wait*40+'+duck\n'+wait*10+'viewpos\n-duck\n'+wait*10+'viewpos\n+use\n'+wait*3+'-use\necho BHL_PACKAGE_MOVEMENT\nquit\n',
+        # Waits count frames. Allow the jump to land (about 0.8 s) even at the
+        # 120 FPS limit; the earlier timings only passed at roughly 10 FPS.
+        'movement': 'map _zoo\n'+wait*35+'viewpos\n+forward\n'+wait*30+'-forward\n'+wait*3+'viewpos\n+jump\n'+wait*10+'-jump\nviewpos\n'+wait*150+'+duck\n'+wait*30+'viewpos\n-duck\n'+wait*30+'viewpos\n+use\n'+wait*3+'-use\necho BHL_PACKAGE_MOVEMENT\nquit\n',
         'display': 'map c1a0\nscr_conspeed 100000\n'+wait*80+
                    'width 1024\nheight 576\nfullscreen 0\n'+wait*40+'vid_info\nsnapshot scrshots/native-display-window.png\n'+wait*3+
                    'fullscreen 1\n'+wait*60+'vid_info\nsnapshot scrshots/native-display-full.png\n'+wait*3+

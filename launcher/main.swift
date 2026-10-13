@@ -54,7 +54,7 @@ struct Installation {
                 return ad < bd
             }?.deletingPathExtension().lastPathComponent
     }
-    func process(mode: Int, resolution: Int, fullscreen: Bool, difficulty: Int, frameRate: Int = 0, vsync: Bool = true, testScript: String? = nil) throws -> Process {
+    func process(mode: Int, resolution: Int, fullscreen: Bool, difficulty: Int, frameRate: Int = 0, vsync: Bool = true, aroundNotch: Bool = false, testScript: String? = nil) throws -> Process {
         try validate()
         // The window-owning process must retain our app identity and Game Mode
         // metadata. A bare Runtime/xash3d child does not inherit them.
@@ -68,7 +68,12 @@ struct Installation {
         env["SDL_EGL_LIBRARY"] = runtime.appendingPathComponent("libEGL.dylib").path
         env["SDL_OPENGL_LIBRARY"] = runtime.appendingPathComponent("libGLESv2.dylib").path
         env["ANGLE_DEFAULT_PLATFORM"] = "metal"
-        env["SDL_VIDEO_MAC_FULLSCREEN_SPACES"] = "1"
+        // A macOS fullscreen Space always keeps the picture below the camera
+        // housing. Covering the whole display instead measured about 7 ms less
+        // presentation latency on the development M1 Pro; Game Mode still
+        // activates for this fullscreen window.
+        let fullDisplay = fullscreen && aroundNotch
+        env["SDL_VIDEO_MAC_FULLSCREEN_SPACES"] = fullDisplay ? "0" : "1"
         let sizes = [(1280, 720), (1600, 900), (1920, 1080), (2560, 1440)]
         let size = sizes[min(max(resolution, 0), sizes.count - 1)]
         var args = ["--run-engine", "-game", "bhl", "-ref", "metal", "-metal", "-dll", runtime.appendingPathComponent("hl_arm64.dylib").path,
@@ -86,6 +91,10 @@ struct Installation {
         } else {
             let limits = [120, 60, 1000]
             args += ["+fps_max", String(limits[min(max(frameRate, 0), limits.count - 1)]), "+gl_vsync", vsync ? "1" : "0"]
+            // With VSync, start each frame when at most one finished frame is
+            // waiting for the display, instead of letting the swap chain run
+            // two frames ahead. Measured only for the full-display window.
+            args += ["+host_vsync_pacing", vsync && fullDisplay ? "1" : "0"]
             switch mode {
             case 1: args += ["+map", "start"]
             case 2: args += ["+map", "_zoo"]
@@ -105,7 +114,7 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var window: NSWindow!
     var content: Backdrop!
     var mode: NSPopUpButton!, display: NSPopUpButton!, difficulty: NSPopUpButton!, frameRate: NSPopUpButton!
-    var fullscreen: NSButton!, vsync: NSButton!, play: MetalButton!, status: NSTextField!
+    var fullscreen: NSButton!, vsync: NSButton!, aroundNotch: NSButton!, play: MetalButton!, status: NSTextField!
     var child: Process?
     var output: FileHandle?
     var sessionLock: Int32 = -1
@@ -119,7 +128,7 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
-            defaults.register(defaults: ["difficulty": 1, "vsync": true])
+            defaults.register(defaults: ["difficulty": 1, "vsync": true, "aroundNotch": true])
             if let i = CommandLine.arguments.firstIndex(of: "--write-iconset"), i + 1 < CommandLine.arguments.count {
                 try writeIconset(URL(fileURLWithPath: CommandLine.arguments[i + 1])); exit(0)
             }
@@ -169,10 +178,15 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
         difficulty = picker("DIFFICULTY", ["Easy", "Normal", "Hard"], y: 392, key: "difficulty")
         fullscreen = NSButton(checkboxWithTitle: "Fullscreen", target: nil, action: nil)
         fullscreen.toolTip = "Use macOS fullscreen, with automatic Game Mode when enabled in macOS."
-        fullscreen.frame = NSRect(x: 265, y: 438, width: 185, height: 30); fullscreen.state = defaults.bool(forKey: "fullscreen") ? .on : .off
+        fullscreen.frame = NSRect(x: 265, y: 438, width: 130, height: 30); fullscreen.state = defaults.bool(forKey: "fullscreen") ? .on : .off
         content.addSubview(fullscreen)
+        aroundNotch = NSButton(checkboxWithTitle: "Around notch", target: nil, action: nil)
+        aroundNotch.toolTip = "Fullscreen covers the whole display, including the area beside the camera. Lowest latency; the camera hides a small strip at the top centre. Off keeps the picture below the camera in a macOS fullscreen Space."
+        aroundNotch.frame = NSRect(x: 400, y: 438, width: 160, height: 30); aroundNotch.state = defaults.bool(forKey: "aroundNotch") ? .on : .off
+        content.addSubview(aroundNotch)
         vsync = NSButton(checkboxWithTitle: "VSync", target: nil, action: nil)
-        vsync.frame = NSRect(x: 465, y: 438, width: 200, height: 30); vsync.state = defaults.bool(forKey: "vsync") ? .on : .off
+        vsync.toolTip = "Steady frames without tearing. In fullscreen around the notch, frames are paced for low latency."
+        vsync.frame = NSRect(x: 570, y: 438, width: 125, height: 30); vsync.state = defaults.bool(forKey: "vsync") ? .on : .off
         content.addSubview(vsync)
         _ = button("CONTROLS", NSRect(x: 40, y: 494, width: 208, height: 46), #selector(controls))
         _ = button("SAVED GAMES", NSRect(x: 266, y: 494, width: 208, height: 46), #selector(openSaves))
@@ -198,6 +212,7 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
             defaults.set(mode.indexOfSelectedItem, forKey: "mode"); defaults.set(display.indexOfSelectedItem, forKey: "resolution")
             defaults.set(difficulty.indexOfSelectedItem, forKey: "difficulty"); defaults.set(fullscreen.state == .on, forKey: "fullscreen")
             defaults.set(frameRate.indexOfSelectedItem, forKey: "frameRate"); defaults.set(vsync.state == .on, forKey: "vsync")
+            defaults.set(aroundNotch.state == .on, forKey: "aroundNotch")
             try start()
         } catch { NSAlert(error: error).runModal() }
     }
@@ -213,7 +228,8 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let p = try installation.process(mode: mode?.indexOfSelectedItem ?? 0, resolution: display?.indexOfSelectedItem ?? 0,
                                              fullscreen: testScript != nil ? CommandLine.arguments.contains("--engine-test-fullscreen") : fullscreen?.state == .on,
                                              difficulty: difficulty?.indexOfSelectedItem ?? 1,
-                                             frameRate: frameRate?.indexOfSelectedItem ?? 0, vsync: vsync?.state != .off, testScript: testScript)
+                                             frameRate: frameRate?.indexOfSelectedItem ?? 0, vsync: vsync?.state != .off,
+                                             aroundNotch: testScript != nil ? CommandLine.arguments.contains("--engine-test-notch") : aroundNotch?.state == .on, testScript: testScript)
             let handle = try installation.openPlayLog(for: p)
             p.standardOutput = handle; p.standardError = handle; output = handle
             // Inherit the same lock through stdin. If the launcher crashes,

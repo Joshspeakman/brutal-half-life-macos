@@ -1,6 +1,7 @@
 #include "rt.h"
 #include <stdlib.h>
 __thread unsigned char *rt_watch_pages;
+__thread const char *rt_watch_reason;
 unsigned char rt_watch_known[RT_WATCH_PAGES];
 static __thread void (*watch_page)(uint32_t);
 static __thread void (*watch_materialize)(void);

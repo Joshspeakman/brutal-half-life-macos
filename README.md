@@ -69,12 +69,22 @@ guarantee. A 60 FPS limit and uncapped mode (engine ceiling: 1,000 FPS) are also
 available. The Controls button explains
 v3's bindings; detailed input/audio/video settings remain in the game menu.
 
-Fullscreen uses native macOS fullscreen Spaces so the OS can activate Game Mode.
-The game runs inside the app's executable with its own game category and Game
-Mode metadata, while the launcher continues monitoring it. Windowed play does
-not activate Game Mode. On macOS 26 or later, Command-Escape opens Game Overlay;
-if Game Mode was manually disabled there, macOS remembers that choice.
-The resolution selector sets window size; native fullscreen uses desktop resolution.
+Fullscreen covers the whole display by default (**Around notch**), which
+measured about 7 ms less presentation latency than a macOS fullscreen Space
+(about 9 ms with the VSync pacing described below).
+The camera hides a small strip at the top centre of the picture. Turning
+Around notch off uses a native fullscreen Space below the camera instead.
+Game Mode activated in both modes on the development Mac. The game runs inside
+the app's executable with its own game category and Game Mode metadata, while
+the launcher continues monitoring it. Windowed play does not activate Game Mode.
+On macOS 26 or later, Command-Escape opens Game Overlay; if Game Mode was
+manually disabled there, macOS remembers that choice.
+The resolution selector sets window size; fullscreen uses desktop resolution.
+
+With VSync in fullscreen around the notch, the engine paces frames from Metal's
+presentation feedback, keeping one finished frame queued instead of two. This
+keeps the steady 120 Hz cadence of VSync and reduces latency. VSync off
+avoids the queue but tears and presents frames at uneven intervals.
 
 The translated runtime builds at `-O2` with ThinLTO. The adapters synchronize
 entity state when translated code first accesses it, validate cached model

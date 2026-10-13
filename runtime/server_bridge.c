@@ -43,7 +43,7 @@ static unsigned edict_capacity;
 typedef struct EntitySnapshot {int valid;uint64_t access_epoch;entvars_t host;BhlEntvars guest;} EntitySnapshot;
 static EntitySnapshot *entity_snapshots;
 static unsigned server_call_depth,server_access_count;
-static int server_demand_enabled,server_watch_running;
+static int server_demand_enabled,server_demand_rearm,server_watch_running;
 static uint64_t server_access_serial,server_access_epoch;
 static unsigned server_accessed[8192];
 static void server_lazy_begin(void);
@@ -167,18 +167,33 @@ static void pull_entities(void)
 {
     BHL_PROFILE("server-pull",0);ensure_entities();
     if(server_demand_enabled){server_lazy_begin();return;}
+    if(bridge_sync_stats_enabled)bridge_fallback(server_call_depth?"server-full-pull-in-call":"server-full-pull");
     server_lazy_materialize();
     /* String contents can change between boundaries, but not during this
        synchronous scan. Shared class/model IDs need one comparison per scan. */
     if(string_validation_batch||!++string_validation_serial)abort();string_validation_batch=string_validation_serial;
     for(unsigned i=0;i<edict_capacity;i++)pull_entity(i);
     string_validation_batch=0;
+    /* A fallback inside a game callback used to leave the rest of that call
+       on full synchronization, scanning the world at every later engine call
+       (AI movement loops call WalkMove per step). After this full pull, guest
+       records differ from their snapshots only where native code wrote into
+       borrowed guest memory; publish exactly those now, as the next full push
+       would have, then resume demand access for the rest of the callback. */
+    if(server_demand_rearm&&server_call_depth){
+        server_demand_rearm=0;
+        for(unsigned i=0;i<edict_capacity;i++)push_entity(i);
+        server_demand_enabled=1;server_lazy_begin();
+    }
 }
 static void push_entities(void)
 {
     BHL_PROFILE("server-push",0);server_access_verify();
     if(server_access_epoch){for(unsigned n=0;n<server_access_count;n++)push_entity(server_accessed[n]);}
-    else if(guest_edicts)for(unsigned i=0;i<edict_capacity;i++)push_entity(i);
+    else if(guest_edicts){
+        if(bridge_sync_stats_enabled)bridge_fallback(server_call_depth?"server-full-push-in-call":"server-full-push");
+        for(unsigned i=0;i<edict_capacity;i++)push_entity(i);
+    }
 }
 #include "server_entity_access.inc"
 
@@ -193,7 +208,7 @@ static uint32_t model_copy(void *host)
 }
 static void trace_to_guest(uint32_t address,const TraceResult *t)
 {
-    if(guest_edicts&&address-guest_edicts<8192*sizeof(BhlEdict))server_lazy_materialize();
+    if(guest_edicts&&address-guest_edicts<8192*sizeof(BhlEdict)){bridge_boundary="trace-into-edict";server_lazy_materialize();}
     memcpy(G_MEM+address,t,48);rt_w32(G_MEM,address+48,guest_edict(t->pHit));rt_w32(G_MEM,address+52,t->iHitgroup);
 }
 #define DELTA_HANDLE 0x7e000100u
@@ -217,7 +232,7 @@ typedef struct CvarBridge { uint32_t guest; cvar_t *host; struct CvarBridge *nex
 static CvarBridge *cvars;
 static char *gs(uint32_t p)
 {
-    if(guest_edicts&&p-guest_edicts<8192*sizeof(BhlEdict))server_lazy_materialize();
+    if(guest_edicts&&p-guest_edicts<8192*sizeof(BhlEdict)){bridge_boundary=bridge_label("borrowed-edict-pointer");server_lazy_materialize();}
     return p?(char *)G_MEM+p:NULL;
 }
 /* Only explicit, synchronous read-only arguments use this bounded borrow. */
@@ -303,7 +318,7 @@ static uint32_t server_call_full(unsigned slot,const uint32_t *args,unsigned n)
     sync_basic_globals();pull_info();
     uint32_t result=bhl_invoke(rt_r32(G_MEM,guest_api+4*slot),args,n,0);
     push_entities();push_globals();push_info();server_watch_suspend();
-    if(!--server_call_depth)server_demand_enabled=0;return result;
+    if(!--server_call_depth)server_demand_enabled=server_demand_rearm=0;return result;
 }
 static uint32_t server_call(unsigned slot,const uint32_t *args,unsigned n)
 {
@@ -339,7 +354,7 @@ static void (*commands[])(void)={command_0,command_1,command_2,command_3,command
 #define RAW_RET(v) do{c->eax=(uint32_t)(v);c->esp+=4;return;}while(0)
 static void engine_dispatch(Ctx *c,unsigned slot)
 {
-    BHL_PROFILE("server-engine",slot);
+    BHL_PROFILE("server-engine",slot);bridge_boundary=engine_names[slot];
     if(bridge_trace)fprintf(stderr,"engine %s\n",engine_names[slot]);
     /* These APIs cannot observe edicts or globals. Avoid copying the entire
        world when original AI asks for a random value or reads a cvar. */
@@ -367,6 +382,12 @@ static void engine_dispatch(Ctx *c,unsigned slot)
     case BHL_ENG_pfnEntOffsetOfPEntity:RAW_RET(A(0)-guest_edicts);
     case BHL_ENG_pfnAllocString:RAW_RET(guest_string(engine.pfnAllocString(gs(A(0)))));
     case BHL_ENG_pfnModelIndex:RAW_RET(engine.pfnModelIndex(gs(A(0))));
+    /* Pinned pfnPrecacheModel/pfnPrecacheSound only update the precache
+       string tables and model cache (with a resource message for a late
+       precache). Neither reads or writes edicts or globals, nor reenters the
+       game DLL, so gore spawns no longer synchronize the world per call. */
+    case BHL_ENG_pfnPrecacheModel:RAW_RET(engine.pfnPrecacheModel(gs(A(0))));
+    case BHL_ENG_pfnPrecacheSound:RAW_RET(engine.pfnPrecacheSound(gs(A(0))));
     case BHL_ENG_pfnModelFrames:RAW_RET(engine.pfnModelFrames(A(0)));
     case BHL_ENG_pfnGetModelPtr:{
         /* Native validity is engine-owned; the only game-owned input read
@@ -391,8 +412,20 @@ static void engine_dispatch(Ctx *c,unsigned slot)
            Free/private/client validity stays engine-owned. Preserve native
            search semantics while publishing only the fields it consumes. */
         ensure_entities();
-        for(unsigned i=0;i<edict_capacity;i++)if(!edict_base[i].free){
-            server_touch(i);
+        /* In an access scope, untouched edicts have authoritative native
+           bounds; only records the original code touched can carry pending
+           bound writes. Materializing every edict here made AI sphere-search
+           loops scan the world once per call. Full synchronization keeps
+           every guest record current, so publish all of them then. */
+        if(server_access_epoch){
+            for(unsigned n=0;n<server_access_count;n++){
+                unsigned i=server_accessed[n];if(i>=edict_capacity||edict_base[i].free)continue;
+                BhlEdict *g=(void*)(G_MEM+guest_edicts+i*sizeof *g);
+                memcpy(edict_base[i].v.absmin,g->v.absmin,sizeof(vec3_t));
+                memcpy(edict_base[i].v.absmax,g->v.absmax,sizeof(vec3_t));
+            }
+        }
+        else for(unsigned i=0;i<edict_capacity;i++)if(!edict_base[i].free){
             BhlEdict *g=(void*)(G_MEM+guest_edicts+i*sizeof *g);
             memcpy(edict_base[i].v.absmin,g->v.absmin,sizeof(vec3_t));
             memcpy(edict_base[i].v.absmax,g->v.absmax,sizeof(vec3_t));
@@ -575,9 +608,15 @@ static void movement_run(playermove_t *move,qboolean server)
 
 static void link_entity(uint32_t function,entvars_t *pev)
 {
+    /* Class factories are game entry points like the exported API: give them
+       the same demand-access scope. Without one, every engine call made while
+       spawning (private data, strings, models) synchronized the whole world. */
     edict_t *h=(edict_t*)((char*)pev - offsetof(edict_t,v));
+    packet_snapshot_valid=0;
+    if(!server_call_depth++)server_demand_enabled=!bridge_eager_entities;
     sync_basic_globals();uint32_t arg=guest_edict(h)+offsetof(BhlEdict,v);
-    bhl_invoke(function,&arg,1,0);push_entities();push_globals();
+    bhl_invoke(function,&arg,1,0);push_entities();push_globals();server_watch_suspend();
+    if(!--server_call_depth)server_demand_enabled=server_demand_rearm=0;
 }
 #include "entity_exports.h"
 static void key_value(edict_t *entity,KeyValueData *key)
@@ -605,7 +644,7 @@ static void setup_visibility(edict_t *view,edict_t *client,byte **pvs,byte **pas
 {
     uint32_t p=bhl_heap_alloc(8,1),args[]={guest_edict(view),guest_edict(client),p,p+4};server_call(BHL_DLL_pfnSetupVisibility,args,4);
     uint32_t v=rt_r32(G_MEM,p),a=rt_r32(G_MEM,p+4);*pvs=v?G_MEM+v:NULL;*pas=a?G_MEM+a:NULL;bhl_heap_free(p);
-    server_lazy_materialize();packet_snapshot_valid=1;
+    bridge_boundary="packet-snapshot";server_lazy_materialize();packet_snapshot_valid=1;
 }
 static int add_full_pack(entity_state_t *state,int index,edict_t *entity,edict_t *host,int flags,int player,byte *set)
 {

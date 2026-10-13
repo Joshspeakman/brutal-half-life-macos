@@ -552,16 +552,70 @@ static int scalar_crt_import(Ctx *c,const char *qualified)
     return 0;
 }
 
+/* Optional import statistics (BHL_IMPORT_STATS=1), reported at exit. Counts
+ * calls per static import and those made inside a lazy entity-access scope. */
+static int import_stats_enabled;
+static _Atomic uint64_t import_calls[4096],import_scoped[4096];
+__attribute__((constructor)) static void import_stats_initialize(void)
+{import_stats_enabled=getenv("BHL_IMPORT_STATS")!=NULL;}
+__attribute__((destructor)) static void import_stats_report(void)
+{
+    if(!import_stats_enabled)return;
+    for(unsigned i=0;i<rt_imptab_n&&i<4096;i++)if(import_calls[i])
+        fprintf(stderr,"BHL_IMPORT_STATS %s calls=%llu scoped=%llu\n",rt_imptab[i].name,
+            (unsigned long long)import_calls[i],(unsigned long long)import_scoped[i]);
+}
+/* Imports that cannot observe borrowed entity memory keep the caller's lazy
+ * access scope. Calls into other translated modules execute original code,
+ * whose loads and stores pass through the access barrier themselves. Heap,
+ * TLS and last-error services touch only allocator/thread state (and zero a
+ * newly allocated block); glEnable/glDisable/glFogi/glFogf take scalars. */
+enum { IMPORT_UNKNOWN, IMPORT_NATIVE, IMPORT_LOCAL, IMPORT_GUEST, IMPORT_OUTPUT };
+/* These write one fixed-size result through their first argument and read no
+ * other guest memory; materialize only that range. */
+static const struct { const char *name; unsigned size; } import_outputs[]={
+    {"KERNEL32.dll!GetLocalTime",16},{"KERNEL32.dll!GetSystemTime",16},{"KERNEL32.dll!GetSystemTimeAsFileTime",8},
+    {"KERNEL32.dll!QueryPerformanceCounter",8},{"KERNEL32.dll!QueryPerformanceFrequency",8}};
+static _Atomic unsigned char import_output[4096];
+static _Atomic unsigned char import_kind[4096];
+static _Atomic uint32_t import_target[4096];
+static unsigned import_classify(uint32_t index,const char *qualified)
+{
+    static const char *const local[]={
+        "KERNEL32.dll!HeapAlloc","KERNEL32.dll!HeapFree","KERNEL32.dll!HeapReAlloc","KERNEL32.dll!HeapSize",
+        "KERNEL32.dll!GetProcessHeap","KERNEL32.dll!GetLastError","KERNEL32.dll!SetLastError",
+        "KERNEL32.dll!TlsGetValue","KERNEL32.dll!TlsSetValue","KERNEL32.dll!GetCurrentThreadId",
+        "KERNEL32.dll!EncodePointer","KERNEL32.dll!DecodePointer",
+        "OPENGL32.dll!glEnable","OPENGL32.dll!glDisable","OPENGL32.dll!glFogi","OPENGL32.dll!glFogf"};
+    unsigned kind=IMPORT_NATIVE;
+    const char *name=strchr(qualified,'!');
+    if(name&&(!strncasecmp(qualified,"VGUI.dll!",9)||!strncasecmp(qualified,"fmod.dll!",9))){
+        extern uint32_t bhl_export(const char *,const char *);
+        uint32_t target=bhl_export(!strncasecmp(qualified,"VGUI",4)?"vgui.dll":"fmod.dll",name+1);
+        if(target){import_target[index]=target;kind=IMPORT_GUEST;}
+    }
+    else{
+        for(unsigned i=0;i<sizeof local/sizeof *local;i++)if(!strcmp(qualified,local[i]))kind=IMPORT_LOCAL;
+        for(unsigned i=0;i<sizeof import_outputs/sizeof *import_outputs;i++)
+            if(!strcmp(qualified,import_outputs[i].name)){import_output[index]=(unsigned char)import_outputs[i].size;kind=IMPORT_OUTPUT;}
+    }
+    import_kind[index]=kind;return kind;
+}
 static void dispatch_import(Ctx *c, uint32_t index)
 {
     const char *qualified = bhl_import_name(index);
+    if (import_stats_enabled && index < 4096) { import_calls[index]++; if (rt_watch_pages) import_scoped[index]++; }
+    unsigned kind = index < 4096 ? import_kind[index] : IMPORT_NATIVE;
+    if (kind == IMPORT_UNKNOWN) kind = import_classify(index, qualified);
+    if (kind == IMPORT_GUEST && !trace_enabled) { rt_call(c, import_target[index]); return; }
     if (trace_enabled) { fprintf(stderr, "import %08x %s(%08x,%08x,%08x,%08x)\n", rt_r32(G_MEM,c->esp), qualified, A(0), A(1), A(2), A(3)); fflush(stderr); }
     if (index >= rt_imptab_n && index - rt_imptab_n < dynamic_count && dynamic[index - rt_imptab_n].fn) {
         dynamic[index - rt_imptab_n].fn(c); return;
     }
     if(scalar_crt_import(c,qualified))return;
     /* Imported native services may retain or bulk-access borrowed pointers. */
-    rt_watch_materialize();
+    if (kind == IMPORT_OUTPUT) rt_watch_access(A(0), import_output[index]);
+    else if (kind != IMPORT_LOCAL && kind != IMPORT_GUEST) { rt_watch_reason=qualified;rt_watch_materialize();rt_watch_reason=NULL; }
     const char *name = strchr(qualified, '!');
     extern int bhl_platform_import(Ctx *,const char *);
     if(bhl_platform_import(c,qualified))return;

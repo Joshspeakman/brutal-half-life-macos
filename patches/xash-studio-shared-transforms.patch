@@ -1,0 +1,46 @@
+diff --git a/ref/gl/gl_studio.c b/ref/gl/gl_studio.c
+index 39873fb..39a2180 100644
+--- a/ref/gl/gl_studio.c
++++ b/ref/gl/gl_studio.c
+@@ -63,8 +63,8 @@ typedef struct
+ 
+ 	// bones
+ 	matrix3x4		rotationmatrix;
+-	matrix3x4		bonestransform[MAXSTUDIOBONES];
+-	matrix3x4		lighttransform[MAXSTUDIOBONES];
++	matrix3x4		*bonestransform;	// MAXSTUDIOBONES entries; see R_StudioTransformStorage
++	matrix3x4		*lighttransform;
+ 
+ 	// boneweighting stuff
+ 	matrix3x4		worldtransform[MAXSTUDIOBONES];
+@@ -126,7 +126,29 @@ CVAR_DEFINE_AUTO( r_studio_builtin_renderer, "0", 0, "use built-in studio model
+ static cvar_t			*cl_righthand = NULL;
+ 
+ static r_studio_interface_t	*pStudioDraw;
+-static studio_draw_state_t	g_studio;		// global studio state
++static matrix3x4		studio_bonestransform[MAXSTUDIOBONES];
++static matrix3x4		studio_lighttransform[MAXSTUDIOBONES];
++static studio_draw_state_t	g_studio = // global studio state
++{
++	.bonestransform = studio_bonestransform,
++	.lighttransform = studio_lighttransform,
++};
++
++/*
++===============
++Xash_StudioSetTransformStorageV1
++
++Optional host hook: a client adapter that shares the bone and light matrices
++with its own memory may supply MAXSTUDIOBONES-entry arrays for both. Must be
++called before the client queries StudioGetBoneTransform/LightTransform.
++NULL restores the renderer's own storage.
++===============
++*/
++void EXPORT Xash_StudioSetTransformStorageV1( void *bones, void *lights )
++{
++	g_studio.bonestransform = bones ? bones : studio_bonestransform;
++	g_studio.lighttransform = lights ? lights : studio_lighttransform;
++}
+ 
+ // global variables
+ static qboolean m_fDoRemap;

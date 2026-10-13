@@ -166,6 +166,67 @@ static void server_demand_boundaries(void)
     puts("Demand server access passed: cached entvars, first writes, native handoff and pending writes");
 }
 
+/* Inside an access scope, a sphere search publishes pending guest bounds of
+   touched edicts and keeps native bounds for untouched ones, without
+   materializing those untouched records (here on another guest page). */
+static int sphere_scope_calls;
+static edict_t *find_sphere_scoped(edict_t *start,const float *origin,float radius)
+{
+    (void)start;(void)origin;(void)radius;sphere_scope_calls++;
+    assert(fixture_edicts[1].v.absmin[0]==-31&&fixture_edicts[1].v.absmax[0]==19);
+    assert(fixture_edicts[7].v.absmin[0]==50&&fixture_edicts[7].v.absmax[0]==60);
+    return fixture_edicts+7;
+}
+static void sphere_scope_boundaries(void)
+{
+    uint32_t first=guest_edict(fixture_edicts+1),far=guest_edict(fixture_edicts+7);
+    uint32_t min1=first+offsetof(BhlEdict,v)+offsetof(BhlEntvars,absmin);
+    assert((first>>12)!=(far>>12)&&((first+sizeof(BhlEdict)-1)>>12)!=(far>>12));
+    BhlEdict *g7=(void*)(G_MEM+far);
+    fixture_edicts[7].free=0;fixture_edicts[7].v.absmin[0]=40;fixture_edicts[7].v.absmax[0]=45;
+    fixture_edicts[1].v.absmax[0]=19;sync_basic_globals();assert(g7->v.absmin[0]==40);
+    server_demand_enabled=1;pull_entities();assert(server_access_epoch);
+    /* The engine moved the untouched edict: its guest copy is now stale. */
+    fixture_edicts[7].v.absmin[0]=50;fixture_edicts[7].v.absmax[0]=60;
+    watched_write(min1,-31);
+    edict_t *(*previous)(edict_t *,const float *,float)=engine.pfnFindEntityInSphere;engine.pfnFindEntityInSphere=find_sphere_scoped;
+    Ctx query={0};query.esp=bhl_heap_alloc(32,1);uint32_t origin=bhl_heap_alloc(12,1);
+    rt_w32(G_MEM,query.esp+4,0);rt_w32(G_MEM,query.esp+8,origin);rt_wf32(G_MEM,query.esp+12,12);
+    engine_dispatch(&query,BHL_ENG_pfnFindEntityInSphere);
+    assert(sphere_scope_calls==1&&query.eax==far&&server_access_epoch);
+    assert(entity_snapshots[7].access_epoch!=server_access_epoch&&g7->v.absmin[0]==40);
+    /* The returned entity materializes current native state on first access. */
+    assert(watched_float(far+offsetof(BhlEdict,v)+offsetof(BhlEntvars,absmin))==50);
+    push_entities();server_watch_suspend();server_demand_enabled=0;pull_entities();
+    assert(fixture_edicts[1].v.absmin[0]==-31&&fixture_edicts[7].v.absmin[0]==50);
+    fixture_edicts[1].v.absmin[0]=-9;fixture_edicts[7].free=1;engine.pfnFindEntityInSphere=previous;sync_basic_globals();
+    puts("Sphere search scope passed: pending touched bounds, untouched native bounds, no materialization");
+}
+
+/* A fallback inside a game callback resumes demand access at the next
+   boundary, publishing native writes made through the borrowed pointer. */
+static void demand_rearm_boundaries(void)
+{
+    uint32_t identity=guest_edict(fixture_edicts+1);
+    uint32_t health=identity+offsetof(BhlEdict,v)+offsetof(BhlEntvars,health);
+    uint32_t armor=identity+offsetof(BhlEdict,v)+offsetof(BhlEntvars,armorvalue);
+    fixture_edicts[1].v.health=10;fixture_edicts[1].v.armorvalue=1;sync_basic_globals();
+    server_call_depth=1;server_demand_enabled=1;pull_entities();assert(server_access_epoch);
+    /* Borrowed edict pointer: complete synchronization for this boundary. */
+    float *native=(float*)gs(armor);assert(!server_access_epoch&&!server_demand_enabled&&server_demand_rearm);
+    *native=7;                       /* the engine writes an output into entvars */
+    pull_entities();                 /* return boundary of that engine call */
+    assert(server_demand_enabled&&server_access_epoch&&!server_demand_rearm);
+    assert(fixture_edicts[1].v.armorvalue==7&&watched_float(armor)==7);
+    /* Native changes after re-arming still reach cached guest pointers. */
+    fixture_edicts[1].v.health=20;pull_entities();assert(watched_float(health)==20);
+    watched_write(health,30);push_entities();server_watch_suspend();
+    assert(fixture_edicts[1].v.health==30&&fixture_edicts[1].v.armorvalue==7);
+    server_call_depth=0;server_demand_enabled=0;pull_entities();
+    fixture_edicts[1].v.health=0;fixture_edicts[1].v.armorvalue=0;sync_basic_globals();
+    puts("Demand re-arm passed: native borrowed write published, demand access resumed, later writes pushed");
+}
+
 int main(void)
 {
     bhl_initialize();globalvars_t globals={0};host_globals=&globals;globals.maxEntities=8;globals.maxClients=1;globals.pStringBase=fixture_strings;
@@ -191,6 +252,8 @@ int main(void)
     int original=fixture_edicts[1].v.classname;strcpy(fixture_strings+original,"crayer");
     sync_basic_globals();assert(!strcmp(gs(guest_strings+g->v.classname),"crayer"));
     server_demand_boundaries();
+    sphere_scope_boundaries();
+    demand_rearm_boundaries();
     save_roundtrip();
     collision_equivalence();
     message_boundaries();

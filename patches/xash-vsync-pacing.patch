@@ -1,0 +1,281 @@
+diff -ruN a/engine/common/host.c b/engine/common/host.c
+--- a/engine/common/host.c
++++ b/engine/common/host.c
+@@ -79,6 +79,10 @@
+ static CVAR_DEFINE_AUTO( host_framerate, "0", FCVAR_FILTERABLE, "locks frame timing to this value in seconds" );
+ static CVAR_DEFINE( host_sleeptime, "sleeptime", "1", FCVAR_ARCHIVE|FCVAR_FILTERABLE, "milliseconds to sleep for each frame. higher values reduce fps accuracy" );
+ static CVAR_DEFINE_AUTO( host_sleeptime_debug, "0", 0, "print sleeps between frames" );
++#if XASH_OSX && !XASH_DEDICATED
++static CVAR_DEFINE_AUTO( host_vsync_pacing, "0", FCVAR_ARCHIVE, "with VSync, start each frame only when at most host_vsync_queue frames await the display (lower input latency)" );
++static CVAR_DEFINE_AUTO( host_vsync_queue, "1", FCVAR_ARCHIVE, "finished frames VSync pacing lets wait for the display (0-2)" );
++#endif
+ CVAR_DEFINE_AUTO( host_allow_materials, "0", FCVAR_LATCH|FCVAR_ARCHIVE, "allow texture replacements from materials/ folder" );
+ CVAR_DEFINE( con_gamemaps, "con_mapfilter", "1", FCVAR_ARCHIVE, "when true show only maps in game folder" );
+ CVAR_DEFINE_AUTO( cl_background, "0", FCVAR_READ_ONLY, "if set to 1, client running a background map" );
+@@ -618,8 +622,45 @@
+ 	return true;
+ }
+ 
++#if XASH_OSX && !XASH_DEDICATED
+ /*
+ ===================
++Host_PaceToDisplay
++
++With VSync, the swap chain otherwise lets the game run two frames ahead of the
++display, adding latency without adding smoothness. Before a single-player frame
++samples input, wait until at most host_vsync_queue finished frames are still
++waiting for the display, using Metal's own presentation callbacks. One queued
++frame keeps the smoothness of buffering while removing a frame of latency.
++Returns false when pacing does not apply.
++===================
++*/
++static qboolean Host_PaceToDisplay( void )
++{
++	static int trace = -1;
++	static unsigned traced;
++	double before, waited;
++	int pending;
++
++	if( !host_vsync_pacing.value || !gl_vsync.value || !Host_IsSinglePlayerGame() || CL_IsPlaybackDemo() || CL_IsRecordDemo() || host.status != HOST_FRAME )
++		return false;
++
++	before = Platform_DoubleTime();
++	pending = Pacing_WaitForQueue( bound( 0, (int)host_vsync_queue.value, 2 ), 0.05 );
++	waited = Platform_DoubleTime() - before;
++
++	// diagnostic: BHL_PACING_TRACE=1 logs each wait on the engine clock
++	if( trace < 0 )
++		trace = getenv( "BHL_PACING_TRACE" ) != NULL;
++	if( trace && traced++ < 20000 )
++		fprintf( stderr, "BHL_PACE %.6f %.6f %d %.6f\n", before, waited, pending, Pacing_LastPresented( ));
++
++	return pending >= 0;
++}
++#endif
++
++/*
++===================
+ Host_FilterTime
+ 
+ Returns false if the time is too short to run a frame
+@@ -633,9 +674,26 @@
+ 	host.realtime += time * scale;
+ 	double dt = host.realtime - oldtime;
+ 
++#if XASH_OSX && !XASH_DEDICATED
++	// wait for the display first, so the frame samples the newest input.
++	// A frame limit at or above the refresh rate cannot lower the rate any
++	// further, and its timer would drift against the display: the pacer
++	// owns frame timing then. Lower limits still apply as usual.
++	if( Host_PaceToDisplay( ))
++	{
++		double period = Pacing_RefreshPeriod();
++
++		if(( period <= 0.0 || host_maxfps.value <= 0.0f || host_maxfps.value * period < 0.95 ) && !Host_Autosleep( dt, scale ))
++			return false;
++	}
+ 	// clamp the fps in multiplayer games
++	else if( !Host_Autosleep( dt, scale ))
++		return false;
++#else
++	// clamp the fps in multiplayer games
+ 	if( !Host_Autosleep( dt, scale ))
+ 		return false;
++#endif
+ 
+ 	host.frametime = host.realtime - oldtime;
+ 	host.realframetime = bound( MIN_FRAMETIME, host.frametime, MAX_FRAMETIME );
+@@ -1200,6 +1258,10 @@
+ 	Cvar_RegisterVariable( &host_allow_materials );
+ 	Cvar_RegisterVariable( &host_serverstate );
+ 	Cvar_RegisterVariable( &host_maxfps );
++#if XASH_OSX && !XASH_DEDICATED
++	Cvar_RegisterVariable( &host_vsync_pacing );
++	Cvar_RegisterVariable( &host_vsync_queue );
++#endif
+ 	Cvar_RegisterVariable( &fps_override );
+ 	Cvar_RegisterVariable( &host_framerate );
+ 	Cvar_RegisterVariable( &host_sleeptime );
+diff -ruN a/engine/platform/apple/pacing_apple.c b/engine/platform/apple/pacing_apple.c
+--- a/engine/platform/apple/pacing_apple.c
++++ b/engine/platform/apple/pacing_apple.c
+@@ -0,0 +1,166 @@
++/*
++pacing_apple.c - presentation feedback for low-latency VSync pacing
++Copyright (C) 2026 Brutal Half-Life macOS port contributors
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++*/
++#include "common.h"
++#include "platform/platform.h"
++#include <objc/runtime.h>
++#include <objc/message.h>
++#include <pthread.h>
++#include <stdatomic.h>
++#include <time.h>
++
++// The renderer (ANGLE's Metal backend) acquires one CAMetalLayer drawable per
++// frame. Counting acquisitions and Metal's presentation callbacks tells the
++// engine how many finished frames are still waiting for the display, with no
++// renderer changes and no assumptions about compositor deadlines.
++static IMP pacing_next_drawable;
++static _Atomic uint64_t pacing_acquired, pacing_presented;
++static _Atomic double pacing_last_presented, pacing_period;
++static pthread_mutex_t pacing_lock = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t pacing_changed = PTHREAD_COND_INITIALIZER;
++static qboolean pacing_hooked;
++
++static void Pacing_Presented( id drawable )
++{
++	double ( *presented_time )( id, SEL ) = (void *)objc_msgSend;
++	double when = presented_time( drawable, sel_registerName( "presentedTime" ));
++
++	// presentedTime is 0 for a drawable that was discarded; it still leaves the queue
++	if( when > 0.0 )
++	{
++		double last = atomic_load_explicit( &pacing_last_presented, memory_order_relaxed );
++		double period = atomic_load_explicit( &pacing_period, memory_order_relaxed );
++		double delta = when - last;
++
++		// consecutive presentations are whole refreshes apart: track the
++		// shortest interval, smoothing small timestamp jitter
++		if( last > 0.0 && delta > 0.002 && delta < 0.1 )
++		{
++			if( period <= 0.0 || delta < period * 0.75 )
++				period = delta;
++			else if( delta < period * 1.25 )
++				period += ( delta - period ) * 0.05;
++			atomic_store_explicit( &pacing_period, period, memory_order_relaxed );
++		}
++
++		atomic_store_explicit( &pacing_last_presented, when, memory_order_relaxed );
++	}
++
++	pthread_mutex_lock( &pacing_lock );
++	atomic_fetch_add_explicit( &pacing_presented, 1, memory_order_release );
++	pthread_cond_broadcast( &pacing_changed );
++	pthread_mutex_unlock( &pacing_lock );
++}
++
++static id Pacing_NextDrawable( id layer, SEL cmd )
++{
++	id drawable = (( id (*)( id, SEL ))pacing_next_drawable )( layer, cmd );
++
++	if( drawable )
++	{
++		void ( *add_handler )( id, SEL, void ( ^ )( id )) = (void *)objc_msgSend;
++
++		atomic_fetch_add_explicit( &pacing_acquired, 1, memory_order_release );
++		add_handler( drawable, sel_registerName( "addPresentedHandler:" ), ^( id shown ) { Pacing_Presented( shown ); });
++	}
++
++	return drawable;
++}
++
++static qboolean Pacing_Hook( void )
++{
++	Class layer;
++	Method method;
++
++	if( pacing_hooked )
++		return true;
++
++	layer = objc_getClass( "CAMetalLayer" );
++	method = layer ? class_getInstanceMethod( layer, sel_registerName( "nextDrawable" )) : NULL;
++
++	if( !method )
++		return false;
++
++	pacing_next_drawable = method_setImplementation( method, (IMP)Pacing_NextDrawable );
++	pacing_hooked = true;
++	Con_Reportf( "Presentation feedback pacing enabled\n" );
++	return true;
++}
++
++/*
++==================
++Pacing_WaitForQueue
++
++Blocks until no more than "queued" finished frames are waiting for the
++display, or the timeout passes. Returns the number still queued, or -1 when
++presentation feedback is unavailable.
++==================
++*/
++int Pacing_WaitForQueue( int queued, double timeout )
++{
++	struct timespec deadline;
++	int64_t pending;
++
++	if( !Pacing_Hook( ))
++		return -1;
++
++	clock_gettime( CLOCK_REALTIME, &deadline );
++	deadline.tv_nsec += (long)( timeout * 1e9 );
++	deadline.tv_sec += deadline.tv_nsec / 1000000000;
++	deadline.tv_nsec %= 1000000000;
++
++	pthread_mutex_lock( &pacing_lock );
++
++	for( ;; )
++	{
++		pending = (int64_t)( atomic_load( &pacing_acquired ) - atomic_load( &pacing_presented ));
++
++		if( pending <= queued || pthread_cond_timedwait( &pacing_changed, &pacing_lock, &deadline ))
++			break;
++	}
++
++	pending = (int64_t)( atomic_load( &pacing_acquired ) - atomic_load( &pacing_presented ));
++
++	// a drawable that never reports back (window hidden, resized) must not
++	// stall later frames: forget it after a timeout
++	if( pending > queued )
++		atomic_store( &pacing_presented, atomic_load( &pacing_acquired ) - queued );
++
++	pthread_mutex_unlock( &pacing_lock );
++	return (int)pending;
++}
++
++/*
++==================
++Pacing_LastPresented
++
++Media-clock (CACurrentMediaTime) time of the most recent presented frame.
++==================
++*/
++double Pacing_LastPresented( void )
++{
++	return atomic_load_explicit( &pacing_last_presented, memory_order_relaxed );
++}
++
++/*
++==================
++Pacing_RefreshPeriod
++
++Display refresh period measured from presentations, or 0 when unknown.
++==================
++*/
++double Pacing_RefreshPeriod( void )
++{
++	return atomic_load_explicit( &pacing_period, memory_order_relaxed );
++}
+diff -ruN a/engine/platform/platform.h b/engine/platform/platform.h
+--- a/engine/platform/platform.h
++++ b/engine/platform/platform.h
+@@ -86,6 +86,9 @@
+ 
+ #if XASH_OSX
+ qboolean Apple_GetSerialNumber( char *out, size_t size );
++int Pacing_WaitForQueue( int queued, double timeout );
++double Pacing_LastPresented( void );
++double Pacing_RefreshPeriod( void );
+ #endif
+ 
+ #if XASH_SDL

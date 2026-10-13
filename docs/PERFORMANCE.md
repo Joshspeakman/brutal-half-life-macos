@@ -6,6 +6,126 @@ can reach it. The initial Metal build's roughly 48 FPS combat result was limited
 by CPU synchronization. Access tracking now brings the same bounded combat
 workload close to 120 FPS. Short drops remain; this is not a locked 120 FPS build.
 
+## Presentation pacing and combat frame-time tail (second pass)
+
+Earlier figures measured when `SDL_GL_SwapWindow` returned. They did not show
+when frames reached the display. A new benchmark probe (`--present-trace`,
+`tests/present_probe.m`) also records time blocked in `-[CAMetalLayer
+nextDrawable]`, each drawable's actual `presentedTime` from Metal and each
+command buffer's GPU interval. All figures below come from visible fullscreen
+runs of the scripted `c2a2d` mounted-weapon combat scene: 3,600 frames,
+3456 × 2234 or 3456 × 2168 physical pixels, CoreAudio, normal elapsed
+simulation time, M1 Pro on AC power. They are bounded scripted runs, not a
+physical-input playthrough.
+
+What the probe showed with the previous build:
+
+- **VSync off** (the configuration in the user's last play log) ran at about
+  166 FPS. Frames reached the panel at uneven 5–6 ms intervals with tearing,
+  and about 4% of frames were never displayed.
+- **VSync on** gave a steady cadence: 99% of frames held exactly one
+  8.33 ms refresh. However, the swap chain let the game run two frames ahead,
+  so swap-to-glass was 20.1 ms p50 and 29.0 ms p95.
+- The GPU was not the limit (about 1.1 ms busy per frame at full resolution).
+  The 116–120 FPS ceiling seen in earlier "uncapped" hidden runs came from
+  presentation, not from GPU throughput.
+- Even with no frame queued, a presented frame takes about 10 ms from swap to
+  glass: GPU work plus about one refresh of compositing. Waiting for each
+  frame's own presentation therefore halves the rate. One queued frame is the
+  minimum for 120 FPS.
+
+Changes:
+
+- **Fullscreen around the notch** (launcher option, on by default). A macOS
+  fullscreen Space always keeps the picture below the camera housing, so the
+  window covers 3456 × 2168 of the 3456 × 2234 panel. SDL's non-Space
+  fullscreen covers the whole display. This alone lowered swap-to-glass from
+  20.1/29.0/29.2 ms to 13.5/21.1/25.2 ms (p50/p95/p99). `gamepolicyd` still
+  logged "Game mode status is now on". The camera hides a small strip at the
+  top centre of the picture.
+- **Closed-loop VSync pacing** (`host_vsync_pacing`, enabled by the launcher
+  only for fullscreen around the notch with VSync). The engine counts drawables
+  acquired and presented through Metal's presentation callbacks. Before each
+  frame samples input, it waits until at most `host_vsync_queue` (default 1)
+  finished frames await the display. A frame limit at or above the measured
+  refresh rate is then left to the pacer, because its timer otherwise drifts
+  against the display. A first open-loop design based on CVDisplayLink
+  predictions was measured and rejected: presentation is FIFO, so one late
+  frame delayed later ones and its schedule drifted up to 44 ms ahead.
+- **Server bridge scopes.** Entity class factories called by the engine now
+  enter the same demand-access scope as other game entry points. Previously,
+  each spawned entity (for example a gib) synchronized the whole world at every
+  engine call its spawn code made. A borrowed-pointer fallback inside a game
+  callback no longer leaves the rest of that callback on full synchronization:
+  after the next full pull, the bridge publishes native writes made through the
+  borrowed pointer and resumes demand access. AI local-move checks call
+  `WalkMove` once per step, which previously meant 745 whole-world scans in a
+  2,400-frame run. `pfnFindEntityInSphere` publishes only touched records'
+  bounds inside an access scope.
+- **Import and studio boundaries.** Calls into the other translated modules
+  (VGUI, FMOD), allocator/TLS/last-error services and scalar
+  `glEnable`/`glDisable`/`glFog*` no longer materialize all entities. Time
+  queries touch only their output. Precache calls no longer synchronize
+  entities. The renderer and the original client now share one copy of the
+  studio bone and light matrices (`Xash_StudioSetTransformStorageV1`). That
+  removes four 6 KiB copies around each of about 650 studio calls per frame.
+
+Engine-thread CPU time per frame in the same combat scene (VSync off,
+uncapped, three runs for the final build):
+
+| | Before | After |
+|---|---:|---:|
+| p50 | 5.52 ms | 4.51–4.67 ms |
+| p95 | 8.38 ms | 6.73–6.90 ms |
+| p99 | 10.2 ms | 8.23–8.38 ms |
+| max | 39.2 ms | 15.5–21.1 ms |
+
+Presentation with the launcher defaults (fullscreen around the notch, VSync,
+120 FPS limit), two runs:
+
+| | VSync before (native Space) | After |
+|---|---:|---:|
+| Frames held exactly one refresh | 99.3% | 99.0–99.2% |
+| Swap-to-glass p50 / p95 | 20.1 / 29.0 ms | 11.4 / 12.4–12.5 ms |
+| Swap-to-glass p99 | 29.2 ms | 18.0–18.6 ms |
+
+Input is sampled at the start of a frame, so input-to-glass is roughly the
+frame's CPU time plus swap-to-glass: about 16 ms now, versus about 28 ms with
+VSync before. The remaining two-refresh frames (about 1%) are CPU frames over
+roughly 7 ms. Further CPU work reduces them in any presentation mode.
+
+Validation on the final build: boundary fixtures (including new sphere-scope
+and demand re-arm cases), startup differentials, 17 render contracts on both
+renderers, client save/load, SDL input, the 12-batch weapon soak, all 134
+maps, all ten packaged stages, and 6,000-frame combat runs with
+`--verify-entities` (no untracked writes). The packaged movement stage's
+frame-counted waits only passed at about 10 FPS. They now allow the jump to
+land at 120 FPS, and the stage passes on both the new and the previous build.
+
+Remaining limits of this pass:
+
+- About 1% of combat frames still take two refreshes when their CPU time
+  exceeds roughly 7 ms. Remaining CPU targets are client boundaries (per-call
+  studio entity sync, event API inputs such as `EV_PlayerTrace`, fallbacks
+  after `GetCurrentEntity`), per-return server cvar synchronization and ANGLE
+  (about 15% of the engine thread).
+- Pacing applies only to fullscreen around the notch. Windowed VSync and a
+  fullscreen Space keep the normal swap chain, where pacing measured worse.
+  A 60 FPS limit with VSync alternates between one and three refreshes on a
+  120 Hz display; swap interval 2 would be the proper fix.
+- Not verified by these tests: Cmd-Tab, Command-Escape Game Overlay and the
+  in-game fullscreen toggle in fullscreen around the notch. Physical-input feel
+  in real play.
+- One 15 ms frame in 6,000 was spent inside SDL event pumping
+  (`SDL_WaitEventTimeout`); its cause is unexplained.
+
+Diagnostics added for this work, all off by default: `BHL_SYNC_STATS=1`
+(full-synchronization causes by boundary), `BHL_IMPORT_STATS=1`,
+`BHL_MOUSE_TRACE=1` (cursor, warp and relative-motion calls) and
+`BHL_PACING_TRACE=1`. `tools/benchmark_app.py` gained `--present-trace`,
+`--sample` (in-process engine-thread sampler; `tools/analyze_samples.py`
+summarizes it), `--no-spaces`, `--mouse`, `--cvar` and `--env`.
+
 ## Updated Metal measurements
 
 The October 13 comparison uses the same M1 Pro, Metal renderer, scene scripts,

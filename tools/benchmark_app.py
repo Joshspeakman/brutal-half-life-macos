@@ -18,6 +18,31 @@ import time
 from inputs import ROOT
 
 
+def percentiles(values):
+    if not values:return None
+    ordered=sorted(values);n=len(ordered)
+    return {k:round(ordered[min(n-1,int(n*q))],3) for k,q in (('p50',.5),('p95',.95),('p99',.99))}|{'max':round(ordered[-1],3),'mean':round(sum(values)/n,3)}
+
+
+def summarize_present(present):
+    """Separate CPU work, swap blocking, drawable waits and on-glass cadence."""
+    rows=present['frames']
+    work=[(b[0]-a[1])*1000 for a,b in zip(rows,rows[1:])]
+    shown=[r[4] for r in rows if r[4]>0]
+    glass=[(b-a)*1000 for a,b in zip(shown,shown[1:])]
+    latency=[(r[4]-r[1])*1000 for r in rows if r[4]>0]
+    vblank=1000/120
+    return dict(frames=len(rows),dropped=sum(1 for r in rows if r[4]<=0),display_sync_calls=present['display_sync_calls'],
+                cpu_between_swaps_ms=percentiles(work),swap_ms=percentiles([(r[1]-r[0])*1000 for r in rows]),
+                next_drawable_wait_ms=percentiles([r[2]*1000 for r in rows]),presented_interval_ms=percentiles(glass),
+                swap_to_glass_ms=percentiles(latency),
+                gpu_busy_ms=percentiles([r[7]*1000 for r in rows if len(r)>7 and r[7]>0]),
+                gpu_end_to_glass_ms=percentiles([(r[4]-r[6])*1000 for r in rows if len(r)>7 and r[4]>0 and r[6]>0]),
+                swap_to_gpu_end_ms=percentiles([(r[6]-r[1])*1000 for r in rows if len(r)>7 and r[6]>0]),
+                command_buffers=percentiles([r[8] for r in rows if len(r)>8]),
+                presented_vblanks={str(k):sum(1 for g in glass if round(g/vblank)==k) for k in range(0,6)})
+
+
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--app',type=Path,required=True)
@@ -35,6 +60,14 @@ def main():
     ap.add_argument('--verify-entities',action='store_true',help='Audit untouched mirrors for untracked writes; not a timing run')
     ap.add_argument('--eager-entities',action='store_true',help='Use complete mirror scans as a synchronization comparison control')
     ap.add_argument('--capture',action='store_true',help='Capture the scene after timing stops')
+    ap.add_argument('--present-trace',action='store_true',help='Record swap, nextDrawable waits and Metal presented times')
+    ap.add_argument('--max-drawables',type=int,choices=[2,3],help='Presentation experiment: override CAMetalLayer maximumDrawableCount')
+    ap.add_argument('--display-sync',type=int,choices=[0,1],help='Presentation experiment: override CAMetalLayer displaySyncEnabled')
+    ap.add_argument('--sample',action='store_true',help='With --present-trace, sample engine-thread stacks in process (changes timing slightly)')
+    ap.add_argument('--env',action='append',default=[],metavar='BHL_NAME=VALUE',help='Pass a BHL_ diagnostic option to the game process')
+    ap.add_argument('--cvar',action='append',default=[],metavar='NAME=VALUE',help='Set an engine cvar at launch')
+    ap.add_argument('--no-spaces',action='store_true',help='Experiment: SDL fullscreen without a macOS fullscreen Space')
+    ap.add_argument('--mouse',action='store_true',help='Leave mouse input active (captures the pointer while the game is focused)')
     ap.add_argument('--name',required=True);ap.add_argument('--seconds',type=int,default=180)
     args=ap.parse_args()
     data=args.data.resolve();resources=args.app.resolve()/'Contents/Resources';runtime=resources/'Runtime'
@@ -47,9 +80,12 @@ def main():
     gate=out.with_suffix('.armed');timings=out.with_suffix('.frames.json')
     gate.unlink(missing_ok=True);timings.unlink(missing_ok=True)
     lock=(data/'.game.lock').open('a');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-    probe=ROOT/'work/native/frame-times.dylib'
+    if (args.max_drawables or args.display_sync is not None) and not args.present_trace:ap.error('Layer overrides require --present-trace')
+    trace=out.with_suffix('.present.json');trace.unlink(missing_ok=True)
+    probe=ROOT/('work/native/present-probe.dylib' if args.present_trace else 'work/native/frame-times.dylib')
     staged=probe.with_suffix('.stage.dylib')
-    subprocess.run(['clang','-arch','arm64','-O2','-dynamiclib',str(ROOT/'tests/frame_times.c'),
+    source=['tests/present_probe.m','-fobjc-arc','-framework','Foundation','-framework','QuartzCore','-framework','Metal'] if args.present_trace else ['tests/frame_times.c']
+    subprocess.run(['clang','-arch','arm64','-O2','-dynamiclib',str(ROOT/source[0]),*source[1:],
                     '-L',str(runtime),'-lSDL2-2.0.0','-o',str(staged)],check=True)
     subprocess.run(['codesign','--force','--sign','-',str(staged)],check=True,capture_output=True)
     staged.replace(probe)
@@ -72,17 +108,26 @@ def main():
     env.update(BHL_IMAGE_DIR=str(resources/'Images'),XASH3D_BASEDIR=str(data),XASH3D_EXTRAS_PAK1=str(resources/'extras.pk3'),
                DYLD_LIBRARY_PATH=':'.join(map(str,dict.fromkeys(overrides+[runtime]))),DYLD_PRINT_LIBRARIES='1',
                DYLD_INSERT_LIBRARIES=str(probe),SDL_AUDIODRIVER=args.audio,BHL_BENCH_GATE=str(gate),BHL_BENCH_TIMES=str(timings))
-    env['SDL_VIDEO_MAC_FULLSCREEN_SPACES']='1'
+    env['SDL_VIDEO_MAC_FULLSCREEN_SPACES']='0' if args.no_spaces else '1'
+    if args.present_trace:env['BHL_PRESENT_TRACE']=str(trace)
+    if args.sample:env['BHL_PROBE_SAMPLES']=str(out.with_suffix('.samples.json'))
+    if args.max_drawables:env['BHL_PROBE_MAX_DRAWABLES']=str(args.max_drawables)
+    if args.display_sync is not None:env['BHL_PROBE_DISPLAY_SYNC']=str(args.display_sync)
     if args.bridge_profile:env['BHL_BRIDGE_PROFILE']='1'
+    for option in args.env:
+        key,_,value=option.partition('=')
+        if not key.startswith('BHL_') or not key[4:].replace('_','').isalnum():ap.error('--env accepts BHL_ options only')
+        env[key]=value
     if args.eager_entities:env['BHL_EAGER_ENTITIES']='1'
     if args.verify_entities:env['BHL_VERIFY_ENTITY_ACCESS']='1'
     if args.renderer=='metal':
         env.update(SDL_EGL_LIBRARY=str(runtime/'libEGL.dylib'),SDL_OPENGL_LIBRARY=str(runtime/'libGLESv2.dylib'),ANGLE_DEFAULT_PLATFORM='metal')
     command=[str(args.app.resolve()/'Contents/MacOS/BrutalHalfLife'),'--run-engine','-game','bhl','-ref',args.renderer,'-dll',str((args.server or runtime/'hl_arm64.dylib').resolve()),
              '-clientlib',str((args.client or runtime/'client_arm64.dylib').resolve()),'-menulib',str(runtime/'libmenu.dylib'),
-             *(['-borderless'] if args.fullscreen else ['-hidden','-windowed']),'-nomouse','-width',str(args.width),'-height',str(args.height),'-noip','-noip6','-nomaster',
+             *(['-borderless'] if args.fullscreen else ['-hidden','-windowed']),*([] if args.mouse else ['-nomouse']),'-width',str(args.width),'-height',str(args.height),'-noip','-noip6','-nomaster',
              '-nowriteconfig','-dev','3','+sv_lan','1','+cl_lw','0','+fps_max',str(args.fps_cap),'+gl_vsync',str(int(args.vsync)),
-             '+host_framerate','0' if args.real_time else '0.008333333','+map',args.map,'+exec',script.name]
+             '+host_framerate','0' if args.real_time else '0.008333333',
+             *[part for option in args.cvar for part in ('+'+option.partition('=')[0],option.partition('=')[2])],'+map',args.map,'+exec',script.name]
     if args.renderer=='metal':command.insert(2,'-metal')
     began=time.monotonic();marks={};timeout=False;pending=b''
     expected=[args.core or runtime/'libbhl.dylib',args.client or runtime/'client_arm64.dylib',
@@ -90,7 +135,7 @@ def main():
               runtime/f'libref_{args.renderer}.dylib']
     if args.renderer=='metal':expected += [runtime/'libEGL.dylib',runtime/'libGLESv2.dylib']
     report=dict(map=args.map,renderer=args.renderer,frames=args.frames,logical_size=[args.width,args.height],fixed_simulation_step=None if args.real_time else 1/120,
-                fps_cap=args.fps_cap,vsync=args.vsync,fullscreen=args.fullscreen,audio=args.audio,attack=args.attack,profiling=args.bridge_profile,eager_entities=args.eager_entities,verify_entities=args.verify_entities,
+                fps_cap=args.fps_cap,vsync=args.vsync,mouse=args.mouse,fullscreen_spaces=not args.no_spaces,cvars=args.cvar,diagnostic_env=args.env,present_trace=args.present_trace,max_drawables=args.max_drawables,display_sync=args.display_sync,fullscreen=args.fullscreen,audio=args.audio,attack=args.attack,profiling=args.bridge_profile,eager_entities=args.eager_entities,verify_entities=args.verify_entities,
                 libraries={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in expected})
     p=None
     try:
@@ -117,6 +162,11 @@ def main():
         if p and p.poll() is None:os.killpg(p.pid,signal.SIGKILL);p.wait()
         gate.unlink(missing_ok=True);script.unlink()
     values=json.loads(timings.read_text()) if timings.exists() else []
+    if args.present_trace and trace.exists():
+        present=json.loads(trace.read_text());rows=present['frames']
+        values=[(b[1]-a[1])*1000 for a,b in zip(rows,rows[1:])]
+        timings.write_text(json.dumps(values)+'\n')
+        report['present']=summarize_present(present)
     log=re.sub(r'\x1b\[[0-9;]*m','',out.with_suffix('.log').read_text(errors='replace'))
     loaded={Path(p).name:Path(p).resolve() for p in re.findall(r'dyld\[\d+\]: <[^>]+> (.+)',log)}
     sizes=re.findall(r'Window size: (\d+)x(\d+) \(real (\d+)x(\d+)\)',log)
