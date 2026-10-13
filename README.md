@@ -1,9 +1,10 @@
 # Brutal Half-Life v3 native recompilation
 
 Local development of an Apple Silicon port using the original v3 modules.
-**This is not a playable app yet.** The server loads the intro map and runs
-frames. The client initializes the original HUD, VGUI and FMOD, then begins
-joining the local server. Model conversion still blocks a player session.
+**This is not a finished playable app yet.** The original client connects to
+the native engine, renders the intro and showcase maps, and completes a
+showcase save/load/quit test. Combat, campaign behavior, performance and the
+Mac launcher still need work.
 
 Original x86 instructions are translated to C and compiled to ARM64. The
 runtime uses a 32-bit guest address space and explicit adapters to native
@@ -42,28 +43,37 @@ A build does not install or publish an application.
 | Server interface | Four exports pass 1,000 deterministic x86/ARM64 comparisons |
 | DLL startup | Server, client, FMOD and SDK VGUI complete process attach |
 | Startup comparisons | 990 API boundaries match integer registers and writable memory |
-| Native services | Tests cover codepages, heap ownership, recursive locks, file I/O and explicit missing-call failures |
+| Native services | Tests cover codepages, heap ownership, locks, Unicode file I/O, directory searches, time conversion and binary CRT streams |
 | Server integration | GameInit, movement initialization and three delta encoders run through native callbacks |
 | Headless map | `c0a0` activates and completes at least ten server frames in a bounded session |
-| Client integration | Initialize, weapon-event registration and movement initialization pass in the full engine with a null renderer |
-| Audio | Original FMOD initializes, runs native worker threads and shuts down through a native PCM adapter; sample mixing tests pass |
+| Client integration | Original movement, studio animation, entities and temporary effects cross the native boundary; OpenGL produces a coherent showcase scene and view model |
+| Audio | Original FMOD decodes synthetic WAV and owned game MP3 data to nonzero PCM on the SDL dummy device; five mixer/locking tests pass |
 | VGUI | Original App, Label and Surface code produces text textures through CoreText, paints through the engine API and passes surface restart checks |
-| Complete conversion | Pending: audible/visual comparison, model and rendering integration, player movement, save/load and campaign QA |
+| Saving | Original field serializer round-trips strings, entities, time and landmarks; the showcase saves, reloads, runs again and exits cleanly |
+| Combat smoke test | A scripted pistol/shotgun/rocket session reaches original firing events, requests map music, saves, reloads and quits; this does not validate every weapon or enemy |
+| Complete conversion | Pending: combat, remaining effects, audible/visual comparison, campaign transitions, performance and app packaging |
 
 Startup comparisons share the native OS-service model. They validate the
 translation, **not Windows API equivalence**. Null rendering and dummy audio
 cannot validate graphics or audible output. Adapter counts are not gameplay
 coverage.
 
-Reproduce the current client failure after building:
+Run the bounded client save/load test after building:
 
 ```sh
-.venv/bin/python tests/test_client_engine.py --trace
+.venv/bin/python tests/test_client_engine.py \
+  --renderer gl --video-driver cocoa --map _zoo \
+  --save-load --capture-frames 25 --seconds 90
 ```
 
-This acceptance test currently fails at client model/BSP conversion. Its report is
-`work/reports/client-engine.json`. Faults must be resolved before claiming
-client integration is complete.
+This uses a hidden native window and dummy audio. Its report is
+`work/reports/client-engine.json`; success is a bounded integration result,
+not complete gameplay coverage. `--capture` saves an engine-only PNG in the
+ignored session. The default null renderer cannot exercise v3's studio/GL
+paths. `tools/build_project.py --check-client` runs the OpenGL save/load test.
+
+Native saves preserve v3 callbacks that lack exported names using identifiers
+tied to the exact server binary. Windows save compatibility is not established.
 
 See [port status and acceptance criteria](docs/PORT.md) and
 [dependency provenance](NOTICE.txt). Original assets and generated game code

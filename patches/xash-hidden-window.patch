@@ -1,0 +1,19 @@
+diff --git a/engine/platform/sdl2/vid_sdl2.c b/engine/platform/sdl2/vid_sdl2.c
+index e85afd2..4bfb49c 100644
+--- a/engine/platform/sdl2/vid_sdl2.c
++++ b/engine/platform/sdl2/vid_sdl2.c
+@@ -695,8 +695,12 @@ static rserr_t VID_CreateWindow( const int input_width, const int input_height,
+ 	}
+ 
+ 	VID_SetWindowIcon( host.hWnd );
+-	SDL_ShowWindow( host.hWnd );
+-	SDL_RaiseWindow( host.hWnd );
++	// Permit renderer acceptance tests with a real context and no desktop focus.
++	if( !Sys_CheckParm( "-hidden" ))
++	{
++		SDL_ShowWindow( host.hWnd );
++		SDL_RaiseWindow( host.hWnd );
++	}
+ 
+ 	if( glw_state.software )
+ 	{

@@ -6,6 +6,32 @@ from inputs import ROOT
 from generate_bridge import ENGINE_REVISION, strip_comments
 
 
+def scalar_body(returns, arguments, callee):
+    if '...' in arguments or '(*' in arguments:return None
+    converted=[];word=0
+    for arg in ([] if arguments.strip()=='void' else arguments.split(',')):
+        arg=re.sub(r'(\w+)\s*\[[^]]*\]',r'* \1',arg)
+        arg=' '.join(arg.replace('*',' * ').split())
+        kind=arg if arg.endswith('*') else arg.rsplit(' ',1)[0]
+        if kind in ('int','const int','unsigned int','unsigned short','unsigned char','char','qboolean','HSPRITE','TRICULLSTYLE'):
+            converted.append(f'({kind})A({word})')
+        elif kind=='float':converted.append(f'rt_rf32(G_MEM,c->esp+{4+word*4})')
+        elif kind in ('char *','const char *'):converted.append(f'gs(A({word}))')
+        elif kind in ('float *','const float *','int *','short *','const wrect_t *','unsigned char *','const unsigned char *','byte *','const byte *','struct pmtrace_s *'):
+            converted.append(f'({kind})(A({word})?G_MEM+A({word}):NULL)')
+        else:return None
+        word+=1
+    call=callee+'('+','.join(converted)+')'
+    returns=' '.join(returns.replace('*',' * ').split())
+    if returns=='void':return call+';RET(0);'
+    if returns in ('int','unsigned int','unsigned short','short','qboolean','HSPRITE'):return 'RET('+call+');'
+    if returns in ('float','double'):return 'FPUSH('+call+');RET(0);'
+    if returns in ('char *','const char *'):return 'RET(copy_string('+call+'));'
+    if returns=='particle_t *':return 'RET(particle_guest('+call+'));'
+    if returns=='BEAM *':return 'RET(beam_guest('+call+'));'
+    return None
+
+
 def main():
     upstream = ROOT / 'work/upstream/xash3d-fwgs'
     if subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=upstream, text=True).strip() != ENGINE_REVISION:
@@ -65,7 +91,27 @@ def main():
             match = re.fullmatch(r'(.+?)\(\s*\*\s*(\w+)\s*\)\s*\((.*)\)',raw)
             if match:
                 name = e['name']+'_'+match[2]
-                subcode += f'static void sub_{name}(Ctx *c) {{ client_missing("{e["name"]}.{match[2]}"); }}\n'
+                body=scalar_body(match[1],match[3],f'engine.{e["name"]}->{match[2]}')
+                if name=='pTriAPI_SpriteTexture':body='RET(engine.pTriAPI->SpriteTexture(model_host(A(0)),A(1)));'
+                if name in ('pEfxAPI_CL_AllocDlight','pEfxAPI_CL_AllocElight'):body=f'RET(light_guest(engine.{e["name"]}->{match[2]}(A(0))));'
+                if name=='pEfxAPI_R_AllocParticle':body='RET(particle_alloc(A(0)));'
+                if name in ('pEventAPI_EV_GetPhysent','pEventAPI_EV_GetVisent'):body=f'RET(event_physent(engine.{e["name"]}->{match[2]}(A(0))));'
+                if name in ('pEfxAPI_CL_TempEntAlloc','pEfxAPI_CL_TempEntAllocHigh'):body=f'RET(temp_guest(engine.{e["name"]}->{match[2]}((float*)gs(A(0)),model_host(A(1)))));'
+                if name=='pEfxAPI_CL_TempEntAllocNoModel':body='RET(temp_guest(engine.pEfxAPI->CL_TempEntAllocNoModel((float*)gs(A(0)))));'
+                if name=='pEfxAPI_R_TempModel':body='RET(temp_guest(engine.pEfxAPI->R_TempModel((float*)gs(A(0)),(float*)gs(A(1)),(float*)gs(A(2)),rt_rf32(G_MEM,c->esp+16),A(4),A(5))));'
+                if name=='pEfxAPI_R_DefaultSprite':body='RET(temp_guest(engine.pEfxAPI->R_DefaultSprite((float*)gs(A(0)),A(1),rt_rf32(G_MEM,c->esp+12))));'
+                if name=='pEfxAPI_R_TempSprite':body='RET(temp_guest(engine.pEfxAPI->R_TempSprite((float*)gs(A(0)),(float*)gs(A(1)),rt_rf32(G_MEM,c->esp+12),A(3),A(4),A(5),rt_rf32(G_MEM,c->esp+28),rt_rf32(G_MEM,c->esp+32),A(8))));'
+                if name in ('pEfxAPI_R_Sprite_Smoke','pEfxAPI_R_Sprite_WallPuff'):body=f'engine.{e["name"]}->{match[2]}(temp_host(A(0)),rt_rf32(G_MEM,c->esp+8));RET(0);'
+                if name=='pEfxAPI_R_Sprite_Explode':body='engine.pEfxAPI->R_Sprite_Explode(temp_host(A(0)),rt_rf32(G_MEM,c->esp+8),A(2));RET(0);'
+                if name=='pEfxAPI_R_EntityParticles':body='engine.pEfxAPI->R_EntityParticles(entity_host(A(0)));RET(0);'
+                if name=='pEfxAPI_R_FizzEffect':body='engine.pEfxAPI->R_FizzEffect(entity_host(A(0)),A(1),A(2));RET(0);'
+                if name=='pEfxAPI_R_RicochetSprite':body='engine.pEfxAPI->R_RicochetSprite((float*)gs(A(0)),model_host(A(1)),rt_rf32(G_MEM,c->esp+12),rt_rf32(G_MEM,c->esp+16));RET(0);'
+                # Triangle calls consume their explicit scalar/array inputs
+                # and renderer state, never the mirrored client entity list.
+                # Copying that list per vertex makes immediate drawing costly.
+                sync='' if e['name']=='pTriAPI' else 'entities_push(); '
+                if body and not sync:body=body.replace('RET(','RAW_RET(')
+                subcode += f'static void sub_{name}(Ctx *c) {{ '+sync+(body or f'client_missing("{e["name"]}.{match[2]}");')+' }\n'
                 builders += f'if(engine.{e["name"]}->{match[2]})rt_w32(G_MEM,p+{i*4},bhl_thunk("client-subtable!{name}",sub_{name}));\n'
             elif raw == 'int version':
                 builders += f'rt_w32(G_MEM,p+{i*4},engine.{e["name"]}->version);\n'
@@ -73,6 +119,22 @@ def main():
         builders += 'return p; }\n'
     subcode += 'static uint32_t client_subtable(const char *name,const void *host) { if(!host)return 0;\n'+builders+'client_missing(name);return 0; }\n'
     (out/'client_subtables.h').write_text(subcode)
+    studio_text=strip_comments((upstream/'common/r_studioint.h').read_text())
+    studio_body=studio_text.split('typedef struct engine_studio_api_s')[1].split('{',1)[1].split('} engine_studio_api_t')[0]
+    studio_fields=[]
+    for raw in studio_body.split(';'):
+        match=re.fullmatch(r'(.+?)\(\s*\*\s*(\w+)\s*\)\s*\((.*)\)',' '.join(raw.split()))
+        if match:studio_fields.append(match[2])
+        elif raw.strip():raise ValueError(raw)
+    assert len(studio_fields)==46
+    code='/* Generated studio interface, version 1. */\n'
+    for i,name in enumerate(studio_fields):
+        code+=f'#define BHL_STUDIO_{name} {i}\nstatic void studio_{i}(Ctx *c){{studio_dispatch(c,{i});}}\n'
+    code+='static const char *studio_names[]={'+','.join(json.dumps(n) for n in studio_fields)+'};\n'
+    code+='static void studio_fill(uint32_t p){\n'
+    for i,name in enumerate(studio_fields):code+=f'if(studio.{name})rt_w32(G_MEM,p+{4*i},bhl_thunk("client-studio!{name}",studio_{i}));\n'
+    code+='}\n'
+    (out/'studio_abi.h').write_text(code)
     implementation = (ROOT / 'runtime/client_bridge.c').read_text()
     manual = set(re.findall(r'case BHL_CL_(\w+)', implementation))
     scalars = []

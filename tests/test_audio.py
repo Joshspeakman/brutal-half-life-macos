@@ -85,6 +85,19 @@ class Audio(unittest.TestCase):
         self.assertEqual(self.call(buffer,15,0),0x8878001e)
         self.assertEqual(self.call(buffer,13,8),0x80070057)
 
+    def test_locked_writes_publish_only_on_matching_unlock(self):
+        buffer=self.buffer(struct.pack('<2h',0,0))
+        self.assertEqual(self.call(buffer,12,0,0,1),0)
+        lock=self.n.alloc(16)
+        self.assertEqual(self.call(buffer,11,0,4,lock,lock+4,lock+8,lock+12,0),0)
+        p,size,p2,size2=struct.unpack('<4I',self.n.read(lock,16))
+        self.n.write(p,struct.pack('<2h',8192,-8192))
+        self.assertEqual(self.render(1),[0,0])
+        self.assertEqual(self.call(buffer,19,p,2,p2,size2),0x80070057)
+        self.assertEqual(self.call(buffer,19,p,size,p2,size2),0)
+        self.assertEqual(self.render(1),[.25,-.25])
+        self.assertEqual(self.call(buffer,19,p,size,p2,size2),0x80070057)
+
 
 if __name__=='__main__':
     result=unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(Audio))

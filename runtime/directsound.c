@@ -8,6 +8,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #define A(n) rt_r32(G_MEM,c->esp+4+4*(n))
 #define RET(v,n) do{c->eax=(uint32_t)(v);c->esp+=4+4*(n);return;}while(0)
 #define INVALID 0x80070057u
@@ -17,10 +18,12 @@ extern int bhl_heap_free(uint32_t);
 static SDL_AudioDeviceID device;
 static SDL_AudioSpec output;
 static pthread_mutex_t mutex=PTHREAD_MUTEX_INITIALIZER;
-typedef struct SoundObject {uint32_t guest,refs;int buffer,playing,looping;uint32_t flags,data,size,rate,frequency,channels,bits,align;int32_t volume,pan;double position;struct SoundObject *next;} SoundObject;
-static SoundObject *objects;
+typedef struct SoundLock {uint32_t first,nfirst,second,nsecond;int used;} SoundLock;
+typedef struct SoundObject {uint32_t guest;_Atomic uint32_t refs;int buffer,playing,looping;uint32_t flags,data,size,rate,frequency,channels,bits,align;int32_t volume,pan;double position;uint8_t *pcm;SoundLock locks[16];struct SoundObject *next;} SoundObject;
+static _Atomic(SoundObject *) objects;
 static uint32_t sound_vtable,buffer_vtable;
 static uint64_t mixed_frames;
+static uint64_t audible_samples;
 static void sound_method(Ctx *,unsigned);
 static void buffer_method(Ctx *,unsigned);
 static void missing(Ctx *c,const char *name){rt_unhandled(c,rt_r32(G_MEM,c->esp),name);}
@@ -30,8 +33,8 @@ static SoundObject *object(uint32_t p,int buffer)
 }
 static float sample(SoundObject *s,uint32_t frame,unsigned channel)
 {
-    if(s->channels==1)channel=0;uint32_t p=s->data+frame*s->align+channel*(s->bits/8);
-    return s->bits==16?(int16_t)rt_r16(G_MEM,p)/32768.0f:((int)G_MEM[p]-128)/128.0f;
+    if(s->channels==1)channel=0;uint32_t p=frame*s->align+channel*(s->bits/8);
+    int16_t value;if(s->bits==16){memcpy(&value,s->pcm+p,2);return value/32768.0f;}return ((int)s->pcm[p]-128)/128.0f;
 }
 static void audio_callback(void *unused,Uint8 *stream,int bytes)
 {
@@ -50,10 +53,11 @@ static void audio_callback(void *unused,Uint8 *stream,int bytes)
             a=sample(s,at,1);b=sample(s,next,1);out[2*i+1]+=(a+(b-a)*fraction)*right;s->position+=advance;
         }
     }
-    for(int i=0;i<frames*2;i++){if(out[i]>1)out[i]=1;if(out[i]<-1)out[i]=-1;}
+    for(int i=0;i<frames*2;i++){if(out[i]>1)out[i]=1;if(out[i]<-1)out[i]=-1;if(isfinite(out[i])&&fabsf(out[i])>0.00001f)audible_samples++;}
     mixed_frames+=frames;pthread_mutex_unlock(&mutex);
 }
 uint64_t bhl_audio_frames(void){pthread_mutex_lock(&mutex);uint64_t n=mixed_frames;pthread_mutex_unlock(&mutex);return n;}
+uint64_t bhl_audio_nonzero_samples(void){pthread_mutex_lock(&mutex);uint64_t n=audible_samples;pthread_mutex_unlock(&mutex);return n;}
 void bhl_audio_test_pause(void){if(device)SDL_PauseAudioDevice(device,1);}
 void bhl_audio_test_render(float *samples,unsigned frames){audio_callback(NULL,(Uint8*)samples,frames*2*sizeof(float));}
 static void close_if_unused(void)
@@ -118,7 +122,7 @@ static void sound_method(Ctx *c,unsigned method)
         if(flags&0x10){missing(c,"DirectSound 3D buffer adapter");return;}
         SoundObject *b=create(1);b->flags=(flags&~4u)|8u;b->size=bytes;
         if(fmt&&!format(b,fmt)){b->refs=0;RET(INVALID,4);}if(bytes&&bytes%b->align){b->refs=0;RET(INVALID,4);}
-        if(bytes){b->data=bhl_heap_alloc(bytes,1);if(b->bits==8)memset(G_MEM+b->data,128,bytes);}
+        if(bytes){b->data=bhl_heap_alloc(bytes,1);b->pcm=calloc(1,bytes);if(!b->pcm)abort();if(b->bits==8){memset(G_MEM+b->data,128,bytes);memset(b->pcm,128,bytes);}}
         rt_w32(G_MEM,result,b->guest);RET(0,4);
     }
     case 4:{uint32_t p=A(1);if(!p||rt_r32(G_MEM,p)!=96)RET(INVALID,2);memset(G_MEM+p+4,0,92);rt_w32(G_MEM,p+4,0xf1f);rt_w32(G_MEM,p+8,100);rt_w32(G_MEM,p+12,200000);rt_w32(G_MEM,p+16,1);RET(0,2);}
@@ -135,7 +139,7 @@ static void buffer_method(Ctx *c,unsigned method)
     switch(method){
     case 0:RET(query_interface(s,A(1),A(2)),3);
     case 1:RET(++s->refs,1);
-    case 2:{pthread_mutex_lock(&mutex);unsigned refs=--s->refs;if(!refs){s->playing=0;bhl_heap_free(s->data);s->data=0;}pthread_mutex_unlock(&mutex);close_if_unused();RET(refs,1);}
+    case 2:{pthread_mutex_lock(&mutex);unsigned refs=--s->refs;if(!refs){s->playing=0;bhl_heap_free(s->data);s->data=0;free(s->pcm);s->pcm=NULL;}pthread_mutex_unlock(&mutex);close_if_unused();RET(refs,1);}
     case 3:{uint32_t p=A(1);if(!p||rt_r32(G_MEM,p)!=20)RET(INVALID,2);rt_w32(G_MEM,p+4,s->flags);rt_w32(G_MEM,p+8,s->size);rt_w32(G_MEM,p+12,0);rt_w32(G_MEM,p+16,0);RET(0,2);}
     case 4:{pthread_mutex_lock(&mutex);uint32_t position=(uint32_t)s->position*s->align;if(s->size)position%=s->size;if(A(1))rt_w32(G_MEM,A(1),position);if(A(2))rt_w32(G_MEM,A(2),s->size?(position+output.samples*s->align)%s->size:0);pthread_mutex_unlock(&mutex);RET(0,3);}
     case 5:{uint32_t p=A(1),cap=A(2);if(A(3))rt_w32(G_MEM,A(3),18);if(!p)RET(0,4);if(cap<18)RET(INVALID,4);memset(G_MEM+p,0,18);rt_w16(G_MEM,p,1);rt_w16(G_MEM,p+2,s->channels);rt_w32(G_MEM,p+4,s->rate);rt_w32(G_MEM,p+8,s->rate*s->align);rt_w16(G_MEM,p+12,s->align);rt_w16(G_MEM,p+14,s->bits);RET(0,4);}
@@ -146,6 +150,9 @@ static void buffer_method(Ctx *c,unsigned method)
         if(flags&1){pthread_mutex_lock(&mutex);offset=((uint32_t)s->position*s->align+output.samples*s->align)%s->size;pthread_mutex_unlock(&mutex);}
         if(flags&2){offset=0;bytes=s->size;}if(offset>=s->size||bytes>s->size)RET(INVALID,8);
         uint32_t first=bytes<s->size-offset?bytes:s->size-offset,second=bytes-first;if(second&&(!A(5)||!A(6)))RET(INVALID,8);
+        pthread_mutex_lock(&mutex);unsigned i=0;while(i<16&&s->locks[i].used)i++;
+        if(i==16){pthread_mutex_unlock(&mutex);RET(INVALID,8);}
+        s->locks[i]=(SoundLock){s->data+offset,first,second?s->data:0,second,1};pthread_mutex_unlock(&mutex);
         rt_w32(G_MEM,A(3),s->data+offset);rt_w32(G_MEM,A(4),first);if(A(5))rt_w32(G_MEM,A(5),second?s->data:0);if(A(6))rt_w32(G_MEM,A(6),second);RET(0,8);
     }
     case 12:if(A(1)||A(2)||A(3)&~1u)RET(INVALID,4);pthread_mutex_lock(&mutex);s->looping=A(3)&1;s->playing=1;pthread_mutex_unlock(&mutex);RET(0,4);
@@ -157,7 +164,16 @@ static void buffer_method(Ctx *c,unsigned method)
         pthread_mutex_lock(&mutex);if(method==15)s->volume=value;else if(method==16)s->pan=value;else s->frequency=value?value:s->rate;pthread_mutex_unlock(&mutex);RET(0,2);
     }
     case 18:pthread_mutex_lock(&mutex);s->playing=0;pthread_mutex_unlock(&mutex);RET(0,1);
-    case 19:if(A(1)<s->data||(uint64_t)A(1)+A(2)>(uint64_t)s->data+s->size||(A(3)&&A(3)!=s->data)||A(4)>s->size)RET(INVALID,5);RET(0,5);
+    case 19:{
+        pthread_mutex_lock(&mutex);SoundLock *found=NULL;
+        for(unsigned i=0;i<16;i++){SoundLock *l=&s->locks[i];if(l->used&&l->first==A(1)&&l->nfirst==A(2)&&l->second==A(3)&&l->nsecond==A(4)){found=l;break;}}
+        if(!found){pthread_mutex_unlock(&mutex);RET(INVALID,5);}
+        /* Publish complete writes under the mixer lock. The SDL callback never
+           reads guest memory while the FMOD worker is modifying a lock. */
+        memcpy(s->pcm+found->first-s->data,G_MEM+found->first,found->nfirst);
+        if(found->nsecond)memcpy(s->pcm,G_MEM+found->second,found->nsecond);
+        found->used=0;pthread_mutex_unlock(&mutex);RET(0,5);
+    }
     case 20:RET(0,1); /* Software buffers never lose their backing storage. */
     default:{char text[96];snprintf(text,sizeof text,"DirectSoundBuffer method %u",method);missing(c,text);}
     }

@@ -3,12 +3,27 @@ import argparse
 import hashlib
 import json
 import shutil
+import fcntl
+import os
+import tempfile
 import stat
 import zipfile
 from pathlib import Path, PurePosixPath
 from inputs import ROOT
 
 ARCHIVE_SHA256='29759d1c91fbe00b42e56df2f277663ef89eab8a715542a4722884558bb80cac'
+
+
+def stage_binary(source, target):
+    # Never overwrite a mapped Mach-O inode: macOS can kill a process when
+    # its executable pages change, even if the replacement is also signed.
+    fd, name=tempfile.mkstemp(prefix=target.name+'.stage-',dir=target.parent)
+    os.close(fd)
+    try:
+        shutil.copy2(source,name)
+        os.replace(name,target)
+    finally:
+        if os.path.exists(name):os.unlink(name)
 
 
 def main():
@@ -24,6 +39,11 @@ def main():
         raise RuntimeError('Archive does not match the original BHL v3 release')
     out=ROOT/'work/session'
     out.mkdir(parents=True,exist_ok=True)
+    session_lock=(out/'.session.lock').open('a')
+    fcntl.flock(session_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    fixtures=ROOT/'work/fixtures';fixtures.mkdir(parents=True,exist_ok=True)
+    with zipfile.ZipFile(args.archive) as archive:
+        (fixtures/'bhl-config.cfg').write_bytes(archive.read('config.cfg'))
     if not (out/'valve').exists():
         staging=out/'valve.new'
         if staging.exists():raise RuntimeError('An interrupted valve.new staging copy needs review')
@@ -58,10 +78,10 @@ gamemode "singleplayer_only"
             if hashlib.sha256((ROOT/filename).read_bytes()).hexdigest()!=digest:
                 raise RuntimeError(f'Bridge is stale: {filename}; rebuild before preparing a session')
         upstream=ROOT/'work/upstream/xash3d-fwgs/build'
-        shutil.copy2(upstream/'engine/xash',out/'xash')
-        shutil.copy2(upstream/'filesystem/filesystem_stdio.dylib',out/'filesystem_stdio.dylib')
-        shutil.copy2(ROOT/'work/bridge/hl_arm64.dylib',out/'bhl/dlls/hl_arm64.dylib')
-        shutil.copy2(ROOT/'work/native/libbhl.dylib',out/'bhl/dlls/libbhl.dylib')
+        stage_binary(upstream/'engine/xash',out/'xash')
+        stage_binary(upstream/'filesystem/filesystem_stdio.dylib',out/'filesystem_stdio.dylib')
+        stage_binary(ROOT/'work/bridge/hl_arm64.dylib',out/'bhl/dlls/hl_arm64.dylib')
+        stage_binary(ROOT/'work/native/libbhl.dylib',out/'bhl/dlls/libbhl.dylib')
         if args.client:
             record=json.loads((ROOT/'work/bridge/client-build.json').read_text())
             for filename,digest in record.items():
@@ -69,8 +89,8 @@ gamemode "singleplayer_only"
                     raise RuntimeError(f'Client bridge is stale: {filename}')
             full=ROOT/'work/upstream/xash3d-fwgs/build-client'
             for source,target in [('game_launch/xash3d','xash3d'),('engine/libxash.dylib','libxash.dylib'),('3rdparty/mainui/libmenu.dylib','libmenu.dylib'),('ref/gl/libref_gl.dylib','libref_gl.dylib'),('ref/soft/libref_soft.dylib','libref_soft.dylib'),('ref/null/libref_null.dylib','libref_null.dylib')]:
-                shutil.copy2(full/source,out/target)
-            shutil.copy2(ROOT/'work/bridge/client_arm64.dylib',out/'bhl/cl_dlls/client_arm64.dylib')
+                stage_binary(full/source,out/target)
+            stage_binary(ROOT/'work/bridge/client_arm64.dylib',out/'bhl/cl_dlls/client_arm64.dylib')
     print('Isolated session prepared under work/session; installed games and saves unchanged')
 
 

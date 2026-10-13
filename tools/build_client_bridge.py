@@ -24,7 +24,7 @@ def main():
     subprocess.run(command,check=True)
     subprocess.run(['codesign','--force','--sign','-',str(staged)],check=True)
     staged.replace(out/'client_arm64.dylib')
-    paths=[ROOT/p for p in ['runtime/client_bridge.c','runtime/vgui_bridge.c','runtime/guest_format.inc','tools/generate_client_bridge.py','tools/generate_bridge.py','tools/build_client_bridge.py','work/native/libbhl.dylib','work/bridge/client_arm64.dylib']]
+    paths=[ROOT/p for p in ['runtime/client_bridge.c','runtime/vgui_bridge.c','runtime/guest_format.inc','runtime/model_bridge.inc','runtime/movement_bridge.inc','runtime/effects_bridge.inc','runtime/particle_bridge.inc','runtime/studio_bridge.inc','tools/generate_client_bridge.py','tools/generate_bridge.py','tools/build_client_bridge.py','work/native/libbhl.dylib','work/bridge/client_arm64.dylib']]
     (out/'client-build.json').write_text(json.dumps({str(p.relative_to(ROOT)):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths},indent=2)+'\n')
 
 

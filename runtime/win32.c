@@ -19,6 +19,7 @@
 #include <xlocale.h>
 #include <wctype.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <limits.h>
 #include <math.h>
 #include <stdatomic.h>
@@ -74,6 +75,8 @@ static void (*import_observer)(Ctx *, uint32_t, int);
 void bhl_set_import_observer(void (*fn)(Ctx *, uint32_t, int)) { import_observer = fn; }
 #define A(n) rt_r32(G_MEM, c->esp + 4 + 4 * (n))
 #define RETURN(value, nargs) do { c->eax = (uint32_t)(value); c->esp += 4 + 4 * (nargs); return; } while (0)
+static char *gs(uint32_t p){return p?(char*)G_MEM+p:NULL;}
+#include "guest_format.inc"
 
 void bhl_set_deterministic(int enabled) { deterministic = enabled; }
 void bhl_set_trace(int enabled) { trace_enabled = enabled; }
@@ -232,6 +235,13 @@ static uint32_t convert_text(Ctx *c,int wide)
 }
 typedef struct FileHandle { int used,fd; uint32_t access,share; char path[4096]; } FileHandle;
 static FileHandle files[256];
+typedef struct StdioHandle {FILE *file;uint32_t handle;} StdioHandle;
+static StdioHandle stdio_files[256];
+static uint32_t next_stdio=0x06000000;
+static pthread_mutex_t stdio_lock=PTHREAD_MUTEX_INITIALIZER;
+static __thread uint32_t crt_errno;
+static void set_crt_errno(int value)
+{if(!crt_errno)crt_errno=bhl_heap_alloc(4,1);rt_w32(G_MEM,crt_errno,value);}
 static uint32_t file_error(int e)
 {
     switch(e){case ENOENT:return 2;case ENOTDIR:return 3;case EACCES:case EPERM:return 5;
@@ -254,7 +264,13 @@ static int guest_path(uint32_t p,int wide,char dest[4096])
         iconv_t cd=iconv_open("UTF-8","UTF-16LE");if(cd==(iconv_t)-1)abort();
         size_t result=iconv(cd,&in,&bytes,&out,&left);iconv_close(cd);
         if(result==(size_t)-1){last_error=1113;return 0;}*out=0;
-    }else{size_t n=strnlen((char*)G_MEM+p,sizeof path);if(n==sizeof path){last_error=206;return 0;}memcpy(path,G_MEM+p,n+1);}
+    }else{
+        size_t bytes=strnlen((char*)G_MEM+p,sizeof path);if(bytes==sizeof path){last_error=206;return 0;}
+        UniChar unicode[4096];for(size_t i=0;i<bytes;i++)unicode[i]=cp1252_decode[G_MEM[p+i]];
+        CFStringRef text=CFStringCreateWithCharacters(NULL,unicode,bytes);
+        int ok=CFStringGetCString(text,path,sizeof path,kCFStringEncodingUTF8);CFRelease(text);
+        if(!ok){last_error=206;return 0;}
+    }
     for(char *q=path;*q;q++)if(*q=='\\')*q='/';
     const char *relative=path;
     if(path[0]&&path[1]==':'){if(path[0]!='C'&&path[0]!='c'){last_error=3;return 0;}relative=path+2;while(*relative=='/')relative++;}
@@ -272,6 +288,160 @@ static int guest_path(uint32_t p,int wide,char dest[4096])
     const char *leaf=strrchr(candidate,'/')+1;
     if(!strcmp(leaf,"..")||!strcmp(leaf,".")){last_error=5;return 0;}
     if(snprintf(dest,4096,"%s/%s",resolved,leaf)>=4096){last_error=206;return 0;}return 1;
+}
+/* Directory searches own their native stream, distinct from file handles.
+   macOS has no DOS short-name namespace; cAlternateFileName remains empty. */
+typedef struct FindHandle {
+    DIR *directory;uint32_t handle;int directories_only,case_sensitive;
+    UniChar pattern[1024];size_t length;
+} FindHandle;
+static FindHandle searches[256];
+static uint32_t next_search=0x05000000;
+static pthread_mutex_t search_lock=PTHREAD_MUTEX_INITIALIZER;
+static size_t find_unicode(const char *text,UniChar *out,size_t capacity,int fold)
+{
+    CFStringRef source=CFStringCreateWithCString(NULL,text,kCFStringEncodingUTF8);
+    if(!source)return SIZE_MAX;
+    CFMutableStringRef s=CFStringCreateMutableCopy(NULL,0,source);CFRelease(source);
+    CFStringNormalize(s,kCFStringNormalizationFormC);
+    if(fold)CFStringFold(s,kCFCompareCaseInsensitive,NULL);
+    size_t length=CFStringGetLength(s);
+    if(length<capacity){CFStringGetCharacters(s,CFRangeMake(0,length),out);out[length]=0;}
+    else length=SIZE_MAX;
+    CFRelease(s);return length;
+}
+static int find_match(const UniChar *pattern,size_t m,const UniChar *name,size_t n)
+{
+    /* Win32's common DOS wildcard rules: *.* includes extensionless names,
+       trailing .* is optional, and ? may match no character at a dot/end. */
+    if(m==3&&pattern[0]=='*'&&pattern[1]=='.'&&pattern[2]=='*')m=1;
+    unsigned char current[1024]={1},next[1024];
+    for(size_t i=0;i<m;i++){
+        memset(next,0,n+1);
+        if(pattern[i]=='*'){
+            next[0]=current[0];
+            for(size_t j=1;j<=n;j++)next[j]=current[j]||next[j-1];
+        }else for(size_t j=0;j<=n;j++)if(current[j]){
+            if(j<n&&(pattern[i]=='?'||pattern[i]==name[j]))next[j+1]=1;
+            if(pattern[i]=='?'&&(j==n||name[j]=='.'))next[j]=1;
+            if(pattern[i]=='.'&&j==n&&(i+1==m||(i+2==m&&pattern[i+1]=='*')))next[j]=1;
+        }
+        memcpy(current,next,n+1);
+    }
+    return current[n];
+}
+static uint64_t find_time(struct timespec t)
+{return ((uint64_t)t.tv_sec+11644473600ull)*10000000ull+t.tv_nsec/100;}
+static void write_system_time(uint32_t p,const struct tm *tm,unsigned milliseconds)
+{
+    uint16_t fields[]={tm->tm_year+1900,tm->tm_mon+1,tm->tm_wday,tm->tm_mday,tm->tm_hour,tm->tm_min,tm->tm_sec,milliseconds};
+    memcpy(G_MEM+p,fields,sizeof fields);
+}
+static int read_system_time(uint32_t p,time_t *seconds,unsigned *milliseconds)
+{
+    if(!p)return 0;uint16_t f[8];memcpy(f,G_MEM+p,sizeof f);
+    if(f[0]<1601||f[0]>30827||f[1]<1||f[1]>12||f[3]<1||f[3]>31||f[4]>23||f[5]>59||f[6]>59||f[7]>999)return 0;
+    struct tm tm={.tm_year=f[0]-1900,.tm_mon=f[1]-1,.tm_mday=f[3],.tm_hour=f[4],.tm_min=f[5],.tm_sec=f[6]};
+    time_t result=timegm(&tm);
+    if(tm.tm_mon!=f[1]-1||tm.tm_mday!=f[3])return 0;
+    *seconds=result;*milliseconds=f[7];return 1;
+}
+static int zone_transition(uint32_t p,int year,int bias,time_t *result)
+{
+    uint16_t f[8];memcpy(f,G_MEM+p,sizeof f);
+    if(f[0]&&f[0]!=year)return 0;
+    if(f[1]<1||f[1]>12||f[4]>23||f[5]>59||f[6]>59)return 0;
+    struct tm tm={.tm_year=year-1900,.tm_mon=f[1]-1,.tm_mday=1,.tm_hour=f[4],.tm_min=f[5],.tm_sec=f[6]};
+    timegm(&tm);
+    if(f[0])tm.tm_mday=f[3];
+    else{
+        if(f[2]>6||f[3]<1||f[3]>5)return 0;
+        tm.tm_mday=1+(f[2]+7-tm.tm_wday)%7+7*(f[3]-1);
+        int day=tm.tm_mday;timegm(&tm);if(tm.tm_mon!=f[1]-1){tm.tm_mon=f[1]-1;tm.tm_mday=day-7;}
+    }
+    *result=timegm(&tm)+(int64_t)bias*60;return 1;
+}
+static uint32_t local_zone_information(uint32_t p)
+{
+    if(!p){last_error=87;return 0xffffffff;}
+    time_t now=deterministic?1700000000:time(NULL);struct tm current;localtime_r(&now,&current);
+    struct tm start={.tm_year=current.tm_year,.tm_mday=1};time_t first=timegm(&start);
+    start.tm_year++;time_t end=timegm(&start);struct tm previous;localtime_r(&first,&previous);
+    int standard_offset=previous.tm_gmtoff,daylight_offset=previous.tm_gmtoff,have_standard=0,have_daylight=0;
+    uint16_t transitions[2][8]={{0}};char names[2][32]={{0}};
+    for(time_t t=first;t<=end;t+=86400){
+        struct tm local;localtime_r(&t,&local);int dst=local.tm_isdst>0;
+        if(dst){daylight_offset=local.tm_gmtoff;have_daylight=1;}else{standard_offset=local.tm_gmtoff;have_standard=1;}
+        if(local.tm_zone)snprintf(names[dst],sizeof names[dst],"%s",local.tm_zone);
+        if((local.tm_isdst>0)!=(previous.tm_isdst>0)){
+            time_t lo=t-86400,hi=t;
+            while(hi-lo>1){time_t mid=lo+(hi-lo)/2;struct tm probe;localtime_r(&mid,&probe);if((probe.tm_isdst>0)==dst)hi=mid;else lo=mid;}
+            time_t wall=hi+previous.tm_gmtoff;struct tm transition;gmtime_r(&wall,&transition);
+            uint16_t f[]={transition.tm_year+1900,transition.tm_mon+1,transition.tm_wday,transition.tm_mday,transition.tm_hour,transition.tm_min,transition.tm_sec,0};
+            memcpy(transitions[dst],f,sizeof f);
+        }
+        previous=local;
+    }
+    memset(G_MEM+p,0,172);
+    if(!have_standard)standard_offset=daylight_offset;
+    rt_w32(G_MEM,p,-standard_offset/60);
+    for(unsigned i=0;i<2;i++)for(unsigned j=0;j<31&&names[i][j];j++)rt_w16(G_MEM,p+(i?88:4)+2*j,(unsigned char)names[i][j]);
+    if(have_standard&&have_daylight&&transitions[0][1]&&transitions[1][1]){
+        memcpy(G_MEM+p+68,transitions[0],16);memcpy(G_MEM+p+152,transitions[1],16);
+        rt_w32(G_MEM,p+168,(standard_offset-daylight_offset)/60);return current.tm_isdst>0?2:1;
+    }
+    return 0;
+}
+static int find_next(FindHandle *search,uint32_t output,int wide)
+{
+    if(!output){last_error=87;return 0;}
+    struct dirent *entry;
+    while((entry=readdir(search->directory))){
+        UniChar name[1024],matched[1024];
+        size_t length=find_unicode(entry->d_name,name,1024,0);
+        size_t folded=find_unicode(entry->d_name,matched,1024,!search->case_sensitive);
+        if(length==SIZE_MAX||folded==SIZE_MAX||!find_match(search->pattern,search->length,matched,folded))continue;
+        struct stat st;if(fstatat(dirfd(search->directory),entry->d_name,&st,AT_SYMLINK_NOFOLLOW))continue;
+        int directory=S_ISDIR(st.st_mode);if(search->directories_only&&!directory)continue;
+        if(length>=260){last_error=206;return 0;}
+        memset(G_MEM+output,0,wide?592:320);
+        uint32_t attributes=directory?0x10:0x20;
+        if(!(st.st_mode&S_IWUSR))attributes|=1;
+        if(S_ISLNK(st.st_mode)){attributes|=0x400;rt_w32(G_MEM,output+36,0xa000000c);}
+        rt_w32(G_MEM,output,attributes);
+        rt_w64(G_MEM,output+4,find_time(st.st_birthtimespec));
+        rt_w64(G_MEM,output+12,find_time(st.st_atimespec));
+        rt_w64(G_MEM,output+20,find_time(st.st_mtimespec));
+        uint64_t size=directory?0:st.st_size;rt_w32(G_MEM,output+28,size>>32);rt_w32(G_MEM,output+32,size);
+        if(wide)memcpy(G_MEM+output+44,name,length*2);
+        else for(size_t j=0;j<length;j++){
+            uint8_t byte='?';for(unsigned k=0;k<256;k++)if(cp1252_decode[k]==name[j]){byte=k;break;}
+            G_MEM[output+44+j]=byte;
+        }
+        return 1;
+    }
+    last_error=18;return 0;
+}
+static uint32_t find_first(uint32_t path,int wide,uint32_t info,uint32_t output,uint32_t op,uint32_t filter,uint32_t flags)
+{
+    if(info>1||op>1||filter||(flags&~7u)||!output){last_error=87;return 0xffffffff;}
+    if(!path){last_error=87;return 0xffffffff;}
+    size_t length=0;uint16_t ch=0,previous=0;
+    while(length<32768&&(ch=wide?rt_r16(G_MEM,path+2*length):G_MEM[path+length])){previous=ch;length++;}
+    if(!length||previous=='/'||previous=='\\'){last_error=2;return 0xffffffff;}
+    char full[4096];if(!guest_path(path,wide,full))return 0xffffffff;
+    char *leaf=strrchr(full,'/');if(!leaf||!leaf[1]){last_error=2;return 0xffffffff;}
+    FindHandle fresh={0};fresh.length=find_unicode(leaf+1,fresh.pattern,1024,!(flags&1));
+    if(fresh.length==SIZE_MAX){last_error=206;return 0xffffffff;}
+    *leaf=0;fresh.directory=opendir(full);if(!fresh.directory){last_error=file_error(errno);return 0xffffffff;}
+    fresh.case_sensitive=flags&1;fresh.directories_only=op==1;
+    pthread_mutex_lock(&search_lock);
+    unsigned slot=0;while(slot<256&&searches[slot].directory)slot++;
+    if(slot==256){last_error=4;closedir(fresh.directory);pthread_mutex_unlock(&search_lock);return 0xffffffff;}
+    if(!find_next(&fresh,output,wide)){
+        if(last_error==18)last_error=2;closedir(fresh.directory);pthread_mutex_unlock(&search_lock);return 0xffffffff;
+    }
+    fresh.handle=next_search++;searches[slot]=fresh;pthread_mutex_unlock(&search_lock);return fresh.handle;
 }
 void bhl_process_init(Ctx *c)
 {
@@ -316,6 +486,9 @@ void bhl_process_init(Ctx *c)
     /* Function thunks are dispatch tokens, not readable zero-filled data.
        This also exposes missing data-import adapters instead of hiding them. */
     if(mprotect(G_MEM+BHL_THUNK_BASE,0x100000,PROT_NONE))abort();
+    /* FILE* values are opaque handles; inline Windows FILE structure access
+       needs its own adapter and must not read native libc internals. */
+    if(mprotect(G_MEM+0x06000000,0x100000,PROT_NONE))abort();
 }
 
 static void dispatch_import(Ctx *c, uint32_t index)
@@ -353,9 +526,58 @@ static void dispatch_import(Ctx *c, uint32_t index)
 #define CRT(n) (!strcmp(name,n))
         if(CRT("malloc")||CRT("??2@YAPAXI@Z"))RETURN(bhl_heap_alloc(A(0),0),0);
         if(CRT("free")||CRT("??3@YAXPAX@Z")){heap_free(A(0));RETURN(0,0);}
+        if(CRT("realloc")){
+            uint32_t p=A(0),size=A(1);if(!p)RETURN(bhl_heap_alloc(size,0),0);if(!size){heap_free(p);RETURN(0,0);}
+            Block *b=block_at(p);if(!b){set_crt_errno(22);RETURN(0,0);}uint32_t result=bhl_heap_alloc(size,0);
+            if(result){memcpy(G_MEM+result,G_MEM+p,size<b->size?size:b->size);heap_free(p);}else set_crt_errno(12);RETURN(result,0);
+        }
+        if(CRT("_errno")){if(!crt_errno)crt_errno=bhl_heap_alloc(4,1);RETURN(crt_errno,0);}
+        if(CRT("sprintf")||CRT("_vsnprintf")||CRT("printf")){
+            char text[8192];int print=CRT("printf"),bounded=CRT("_vsnprintf");
+            format_guest(text,gs(A(print?0:bounded?2:1)),bounded?A(3):c->esp+(print?8:12));size_t length=strlen(text);
+            if(print){fwrite(text,1,length,stdout);RETURN(length,0);}
+            if(bounded){size_t cap=A(1),copied=length<cap?length:cap;if(copied)memcpy(G_MEM+A(0),text,copied);if(length<cap)G_MEM[A(0)+length]=0;RETURN(length>cap?0xffffffff:length,0);}
+            memcpy(G_MEM+A(0),text,length+1);RETURN(length,0);
+        }
+        if(CRT("fopen")){
+            char path[4096];const char *mode=(char*)G_MEM+A(1);
+            if(strcmp(mode,"rb")&&strcmp(mode,"wb")&&strcmp(mode,"ab")&&strcmp(mode,"r+b")&&strcmp(mode,"w+b")&&strcmp(mode,"a+b")&&strcmp(mode,"rb+")&&strcmp(mode,"wb+")&&strcmp(mode,"ab+")){
+                missing(c,"CRT fopen text/extended mode");return;
+            }
+            if(!guest_path(A(0),0,path)){set_crt_errno(last_error==5?13:last_error==2||last_error==3?2:22);RETURN(0,0);}
+            pthread_mutex_lock(&stdio_lock);unsigned slot=0;while(slot<256&&stdio_files[slot].file)slot++;
+            if(slot==256||next_stdio>=0x06100000){pthread_mutex_unlock(&stdio_lock);set_crt_errno(24);RETURN(0,0);}
+            FILE *file=fopen(path,mode);int error=errno;uint32_t h=0;
+            if(file){h=next_stdio;next_stdio+=16;stdio_files[slot]=(StdioHandle){file,h};}
+            pthread_mutex_unlock(&stdio_lock);if(!file)set_crt_errno(error);RETURN(h,0);
+        }
+        if(CRT("fread")||CRT("fwrite")||CRT("fseek")||CRT("ftell")||CRT("fclose")||CRT("feof")||CRT("ferror")||CRT("fflush")){
+            uint32_t h=(CRT("fread")||CRT("fwrite"))?A(3):A(0);pthread_mutex_lock(&stdio_lock);StdioHandle *entry=NULL;
+            for(unsigned i=0;i<256;i++)if(stdio_files[i].file&&stdio_files[i].handle==h){entry=&stdio_files[i];break;}
+            uint32_t result=0;
+            if(!entry){set_crt_errno(9);result=(CRT("fread")||CRT("fwrite"))?0:0xffffffff;}
+            else if(CRT("fclose")){result=fclose(entry->file);entry->file=NULL;if(result)set_crt_errno(errno);}
+            else if(CRT("fseek")){
+                int origin=A(2);if(origin<0||origin>2){set_crt_errno(22);result=0xffffffff;}
+                else{result=fseek(entry->file,(int32_t)A(1),origin==0?SEEK_SET:origin==1?SEEK_CUR:SEEK_END);if(result)set_crt_errno(errno);}
+            }else if(CRT("ftell")){
+                long offset=ftell(entry->file);if(offset>INT32_MAX){set_crt_errno(22);result=0xffffffff;}else{result=offset;if(offset<0)set_crt_errno(errno);}
+            }else if(CRT("feof"))result=feof(entry->file);
+            else if(CRT("ferror"))result=ferror(entry->file);
+            else if(CRT("fflush")){result=fflush(entry->file);if(result)set_crt_errno(errno);}
+            else{
+                uint64_t bytes=(uint64_t)A(1)*A(2);
+                if(bytes>UINT32_MAX||(uint64_t)A(0)+bytes>0x100000000ull)set_crt_errno(22);
+                else{result=CRT("fread")?fread(G_MEM+A(0),A(1),A(2),entry->file):fwrite(G_MEM+A(0),A(1),A(2),entry->file);if(ferror(entry->file))set_crt_errno(errno);}
+            }
+            pthread_mutex_unlock(&stdio_lock);RETURN(result,0);
+        }
         if(CRT("memcpy")||CRT("memmove")){memmove(G_MEM+A(0),G_MEM+A(1),A(2));RETURN(A(0),0);}
         if(CRT("memset")){memset(G_MEM+A(0),(unsigned char)A(1),A(2));RETURN(A(0),0);}
         if(CRT("memcmp"))RETURN(memcmp(G_MEM+A(0),G_MEM+A(1),A(2)),0);
+        if(CRT("memchr")){const void *p=memchr(G_MEM+A(0),A(1),A(2));RETURN(p?(const uint8_t*)p-G_MEM:0,0);}
+        if(CRT("atoi"))RETURN(atoi((char*)G_MEM+A(0)),0);
+        if(CRT("abs"))RETURN(A(0)>>31?0u-A(0):A(0),0);
         if(CRT("strlen"))RETURN(strlen((char*)G_MEM+A(0)),0);
         if(CRT("strcmp"))RETURN(strcmp((char*)G_MEM+A(0),(char*)G_MEM+A(1)),0);
         if(CRT("strcpy")){strcpy((char*)G_MEM+A(0),(char*)G_MEM+A(1));RETURN(A(0),0);}
@@ -371,6 +593,8 @@ static void dispatch_import(Ctx *c, uint32_t index)
             FPUSH(value);RETURN(0,0);
         }
         if(CRT("pow")||CRT("fmod")){double a=rt_rf64(G_MEM,c->esp+4),b=rt_rf64(G_MEM,c->esp+12);FPUSH(CRT("pow")?pow(a,b):fmod(a,b));RETURN(0,0);}
+        if(CRT("frexp")){int exponent;double result=frexp(rt_rf64(G_MEM,c->esp+4),&exponent);rt_w32(G_MEM,A(2),exponent);FPUSH(result);RETURN(0,0);}
+        if(CRT("ldexp")){FPUSH(ldexp(rt_rf64(G_MEM,c->esp+4),(int32_t)A(2)));RETURN(0,0);}
         if(CRT("_CIpow")){double exponent=c->st[c->top];c->top=(c->top+1)&7;c->st[c->top]=pow(c->st[c->top],exponent);RETURN(0,0);}
         if(CRT("_initterm")){
             uint32_t first=A(0),last=A(1);
@@ -408,6 +632,34 @@ static void dispatch_import(Ctx *c, uint32_t index)
         struct timeval tv; gettimeofday(&tv, NULL);
         uint64_t t = deterministic ? 133700000000000000ull : ((uint64_t)tv.tv_sec + 11644473600ull) * 10000000 + tv.tv_usec * 10;
         rt_w64(G_MEM, A(0), t); RETURN(0, 1);
+    }
+    if(IS("FileTimeToSystemTime")){
+        if(!A(0)||!A(1)){last_error=87;RETURN(0,2);}uint64_t value=rt_r64(G_MEM,A(0));
+        if(value>>63){last_error=87;RETURN(0,2);}
+        time_t seconds=(int64_t)(value/10000000)-11644473600ll;struct tm tm;
+        if(!gmtime_r(&seconds,&tm)){last_error=87;RETURN(0,2);}
+        write_system_time(A(1),&tm,(value%10000000)/10000);RETURN(1,2);
+    }
+    if(IS("SystemTimeToFileTime")){
+        time_t seconds;unsigned ms;if(!A(1)||!read_system_time(A(0),&seconds,&ms)){last_error=87;RETURN(0,2);}
+        rt_w64(G_MEM,A(1),((uint64_t)seconds+11644473600ull)*10000000ull+ms*10000);RETURN(1,2);
+    }
+    if(IS("GetTimeZoneInformation"))RETURN(local_zone_information(A(0)),1);
+    if(IS("SystemTimeToTzSpecificLocalTime")){
+        time_t seconds;unsigned ms;struct tm tm;
+        if(!A(2)||!read_system_time(A(1),&seconds,&ms)){last_error=87;RETURN(0,3);}
+        if(!A(0))localtime_r(&seconds,&tm);
+        else{
+            uint32_t zone=A(0);int bias=(int32_t)rt_r32(G_MEM,zone),standard=bias+(int32_t)rt_r32(G_MEM,zone+84);
+            int daylight=bias+(int32_t)rt_r32(G_MEM,zone+168),offset=standard;
+            if(rt_r16(G_MEM,zone+70)&&rt_r16(G_MEM,zone+154)){
+                gmtime_r(&seconds,&tm);time_t begin,end;
+                if(!zone_transition(zone+152,tm.tm_year+1900,standard,&begin)||!zone_transition(zone+68,tm.tm_year+1900,daylight,&end)){last_error=87;RETURN(0,3);}
+                if(begin<end?(seconds>=begin&&seconds<end):(seconds>=begin||seconds<end))offset=daylight;
+            }
+            seconds-=(int64_t)offset*60;gmtime_r(&seconds,&tm);
+        }
+        write_system_time(A(2),&tm,ms);RETURN(1,3);
     }
     if (IS("QueryPerformanceCounter")) {
         struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -643,6 +895,17 @@ static void dispatch_import(Ctx *c, uint32_t index)
         if(A(1)){missing(c,"directory security attributes");return;}
         char path[4096];if(!guest_path(A(0),0,path))RETURN(0,2);
         int result=mkdir(path,0755);if(result)last_error=file_error(errno);RETURN(result==0,2);
+    }
+    if(IS("FindFirstFileExW")||IS("FindFirstFileExA"))RETURN(find_first(A(0),IS("FindFirstFileExW"),A(1),A(2),A(3),A(4),A(5)),6);
+    if(IS("FindFirstFileW")||IS("FindFirstFileA"))RETURN(find_first(A(0),IS("FindFirstFileW"),0,A(1),0,0,0),2);
+    if(IS("FindNextFileW")||IS("FindNextFileA")||IS("FindClose")){
+        pthread_mutex_lock(&search_lock);FindHandle *search=NULL;
+        for(unsigned i=0;i<256;i++)if(searches[i].directory&&searches[i].handle==A(0)){search=&searches[i];break;}
+        int result=0;
+        if(!search)last_error=6;
+        else if(IS("FindClose")){closedir(search->directory);search->directory=NULL;result=1;}
+        else result=find_next(search,A(1),IS("FindNextFileW"));
+        pthread_mutex_unlock(&search_lock);RETURN(result,IS("FindClose")?1:2);
     }
     if (IS("CreateFileW")||IS("CreateFileA")) {
         char path[4096];if(!guest_path(A(0),IS("CreateFileW"),path))RETURN(0xffffffff,7);

@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import fcntl
 from native_harness import ROOT
 
 
@@ -15,11 +16,13 @@ def main():
     ap.add_argument('--trace',action='store_true')
     args=ap.parse_args()
     session=ROOT/'work/session'
+    session_lock=(session/'.session.lock').open('a')
+    fcntl.flock(session_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     name='engine-initialization' if args.initialize_only else 'map-session'
     log=ROOT/'work/reports'/f'{name}.log'
     environment=dict(os.environ,BHL_IMAGE_DIR=str(ROOT/'work/images'))
     if args.trace:environment['BHL_BRIDGE_TRACE']='1'
-    command=['./xash','-game','bhl','-dev','3','-noip','-noip6','-nomaster','+sv_lan','1']
+    command=['./xash','-game','bhl','-dev','3','-noip','-noip6','-nomaster','-nowriteconfig','+sv_lan','1']
     command+=['+quit'] if args.initialize_only else ['+map',args.map]
     timeout=False
     with log.open('w') as stream:

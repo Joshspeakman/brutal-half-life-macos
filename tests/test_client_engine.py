@@ -7,6 +7,8 @@ import json
 import os
 import re
 import subprocess
+import shutil
+import fcntl
 from native_harness import ROOT
 
 
@@ -14,11 +16,43 @@ def main():
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--seconds',type=int,default=15)
     ap.add_argument('--trace',action='store_true')
+    ap.add_argument('--renderer',choices=['null','soft','gl'],default='null')
+    ap.add_argument('--video-driver',choices=['dummy','cocoa'],default='dummy')
+    ap.add_argument('--map',default='c0a0')
+    ap.add_argument('--capture',action='store_true',help='Request an engine-only PNG after twenty frames')
+    ap.add_argument('--capture-frames',type=int,default=20)
+    ap.add_argument('--save-load',action='store_true',help='Save, reload, then quit this isolated test session')
+    ap.add_argument('--weapons',nargs='+',help='Exercise primary/secondary fire and reload for these weapon class names')
+    ap.add_argument('--music',action='store_true',help='Request this map music through the original PlayMP3 handler')
     args=ap.parse_args()
+    session_lock=(ROOT/'work/session/.session.lock').open('a')
+    fcntl.flock(session_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     log=ROOT/'work/reports/client-engine.log'
-    environment=dict(os.environ,BHL_IMAGE_DIR=str(ROOT/'work/images'),SDL_VIDEODRIVER='dummy',SDL_AUDIODRIVER='dummy',DYLD_LIBRARY_PATH=str(ROOT/'work/session'))
+    # Earlier startup failures can make the engine save its own defaults before
+    # it ever executes the mod's config. Always test the shipped v3 settings.
+    shutil.copy2(ROOT/'work/fixtures/bhl-config.cfg',ROOT/'work/session/bhl/config.cfg')
+    environment=dict(os.environ,BHL_IMAGE_DIR=str(ROOT/'work/images'),SDL_VIDEODRIVER=args.video_driver,SDL_AUDIODRIVER='dummy',DYLD_LIBRARY_PATH=str(ROOT/'work/session'))
     if args.trace:environment.update(BHL_TRACE='1',BHL_BRIDGE_TRACE='1')
-    command=['./xash3d','-game','bhl','-ref','null','-dev','3','-noip','-noip6','-nomaster','-console','+sv_lan','1','+map','c0a0']
+    if args.weapons:environment['BHL_COMBAT_TRACE']='1'
+    command=['./xash3d','-game','bhl','-ref',args.renderer,'-hidden','-windowed','-width','800','-height','600','-nomouse','-dev','3','-noip','-noip6','-nomaster','-nowriteconfig','-console','+sv_lan','1','+map',args.map]
+    capture=ROOT/'work/session/bhl/scrshots/native-acceptance.png'
+    if args.capture or args.save_load or args.weapons or args.music:
+        capture.unlink(missing_ok=True)
+        script='wait\n'*args.capture_frames
+        if args.capture:script+='snapshot scrshots/native-acceptance.png\n'
+        if args.music:
+            if not re.fullmatch(r'[A-Za-z0-9_-]+',args.map):ap.error('Map name cannot form a music path')
+            script+=f'playaudio {args.map}.mp3\n'+'wait\n'*5
+        if args.weapons:
+            script+='sv_cheats 1\ngod\nimpulse 101\n'+'wait\n'*5
+            for weapon in args.weapons:
+                if not re.fullmatch(r'weapon_[A-Za-z0-9_]+',weapon):ap.error('Invalid weapon class name')
+                script+=f'give {weapon}\n{weapon}\n'+'wait\n'*5+'+attack\n'+'wait\n'*8+'-attack\n'+'wait\n'*3+'+attack2\n'+'wait\n'*5+'-attack2\n+reload\n'+'wait\n'*5+'-reload\n'
+            script+='echo BHL_ACCEPTANCE_COMBAT_FINISHED\n'
+        if args.save_load:script+='save native-acceptance\n'+'wait\n'*5+'load native-acceptance\n'+'wait\n'*20+'echo BHL_ACCEPTANCE_SAVE_LOAD_FINISHED\nquit\n'
+        elif args.weapons or args.music:script+='quit\n'
+        (ROOT/'work/session/bhl/native-acceptance.cfg').write_text(script)
+        command+=['+exec','native-acceptance.cfg']
     timeout=False
     with log.open('w') as stream:
         try:
@@ -33,9 +67,17 @@ def main():
         'hud_initialize':'BHL v3 HUD_Init completed',
         'server_activate':'BHL v3 ServerActivate completed',
         'server_frames':'BHL v3 completed 10 server frames',
+        'client_connected':'client connected at',
     }.items()}
     failures=[line for line in text.splitlines() if re.search('BHL.*(unimplemented|failed|not implemented)|Crash:|Xash Error:|BHL native loader:|Host_Error:',line)]
-    report=dict(stages=stages,failures=failures,returncode=code,timeout=timeout,passed=all(stages.values()) and not failures,rendering_tested=False,gameplay_validated=False)
+    if args.save_load:
+        stages['map_reactivated']=text.count('BHL v3 ServerActivate completed')>=2
+        stages['save_load_finished']='BHL_ACCEPTANCE_SAVE_LOAD_FINISHED' in text and code==0 and not timeout
+    if args.weapons:
+        stages['combat_script_finished']='BHL_ACCEPTANCE_COMBAT_FINISHED' in text and code==0 and not timeout
+        stages['weapon_event_executed']='BHL original weapon event:' in text
+    if args.music:stages['original_music_requested']='BHL original map audio requested:' in text
+    report=dict(stages=stages,failures=failures,returncode=code,timeout=timeout,renderer=args.renderer,map=args.map,passed=all(stages.values()) and not failures and (timeout or code==0) and (not args.capture or capture.exists()),capture=str(capture.relative_to(ROOT)) if args.capture and capture.exists() else None,rendering_tested=False,gameplay_validated=False)
     log.with_suffix('.json').write_text(json.dumps(report,indent=2)+'\n')
     print(json.dumps(report,indent=2))
     raise SystemExit(not report['passed'])

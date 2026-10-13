@@ -26,6 +26,11 @@ def main():
     upstream=ROOT/'work/upstream';upstream.mkdir(parents=True,exist_ok=True)
     engine=upstream/'xash3d-fwgs'
     checkout('https://github.com/FWGS/xash3d-fwgs.git',ENGINE_REVISION,engine,recursive=True)
+    for patch in sorted((ROOT/'patches').glob('xash-*.patch')):
+        already=subprocess.run(['git','apply','--reverse','--check',str(patch)],cwd=engine,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
+        if not already:
+            subprocess.run(['git','apply','--check',str(patch)],cwd=engine,check=True)
+            subprocess.run(['git','apply',str(patch)],cwd=engine,check=True)
     spec=PROFILE['modules']['vgui.dll'];sdk=upstream/'vgui-dev'
     checkout(spec['sdk_repository'],spec['sdk_revision'],sdk)
     payload=(sdk/spec['sdk_path']).read_bytes()

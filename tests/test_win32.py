@@ -1,8 +1,11 @@
 """Independent service-contract tests through the guest calling convention."""
 import json
 import os
+from pathlib import Path
 import struct
 import tempfile
+import datetime
+import time
 import unittest
 from native_harness import Native, ROOT
 
@@ -107,6 +110,128 @@ class Services(unittest.TestCase):
     def test_unknown_behavior_is_explicit(self):
         with self.assertRaisesRegex(RuntimeError, 'unimplemented Windows behavior'):
             self.api('BhlDeliberatelyMissingAPI')
+
+    def test_directory_search_unicode_wildcards_metadata_and_lifetime(self):
+        previous=os.getcwd()
+        with tempfile.TemporaryDirectory(prefix='bhl-find-',dir=ROOT/'work') as directory:
+            try:
+                os.chdir(directory)
+                Path('music').mkdir()
+                Path('music/intro.MP3').write_bytes(b'music')
+                Path('music/t\u00e9st.mp3').write_bytes(b'abc')
+                Path('music/README').write_text('notes')
+                Path('music/ambient').mkdir()
+                output=self.n.alloc(597)
+                self.n.write(output+592,b'GUARD')
+                def search(pattern,op=0,flags=0):
+                    return self.api('FindFirstFileExW',self.blob((pattern+'\0').encode('utf-16le')),0,output,op,0,flags)
+                def name():
+                    return self.n.read(output+44,520).decode('utf-16le').split('\0',1)[0]
+                handle=search('music\\*.mp3')
+                self.assertNotEqual(handle,0xffffffff)
+                found={}
+                while True:
+                    found[name()]=self.words(output+28,2)
+                    self.assertEqual(self.words(output,1)[0]&0x10,0)
+                    self.assertGreater(struct.unpack('<Q',self.n.read(output+20,8))[0],116444736000000000)
+                    if not self.api('FindNextFileW',handle,output):break
+                self.assertEqual(found,{'intro.MP3':(0,5),'t\u00e9st.mp3':(0,3)})
+                self.assertEqual(self.api('GetLastError'),18)
+                self.assertEqual(self.n.read(output+592,5),b'GUARD')
+                self.assertEqual(self.api('FindClose',handle),1)
+                self.assertEqual(self.api('FindClose',handle),0)
+                self.assertEqual(self.api('GetLastError'),6)
+                newer=search('music/*.*')
+                names={name()}
+                while self.api('FindNextFileW',newer,output):names.add(name())
+                self.assertTrue({'README','ambient','intro.MP3','t\u00e9st.mp3'}<=names)
+                self.assertEqual(self.api('FindNextFileW',handle,output),0)
+                self.assertEqual(self.api('GetLastError'),6)
+                self.api('FindClose',newer)
+                handle=search('music/*.mp3',flags=1)
+                self.assertEqual(name(),'t\u00e9st.mp3')
+                self.assertEqual(self.api('FindNextFileW',handle,output),0)
+                self.api('FindClose',handle)
+                handle=search('music/ambient',op=1)
+                self.assertEqual(self.words(output,1)[0]&0x10,0x10)
+                self.api('FindClose',handle)
+                ansi=self.blob(b'music/t\xe9st.mp3\0')
+                handle=self.api('FindFirstFileA',ansi,output)
+                self.assertNotEqual(handle,0xffffffff)
+                self.assertEqual(self.n.read(output+44,9),b't\xe9st.mp3\0')
+                self.api('FindClose',handle)
+                self.assertEqual(search('music/*.missing'),0xffffffff)
+                self.assertEqual(self.api('GetLastError'),2)
+                self.assertEqual(search('../*'),0xffffffff)
+                self.assertEqual(self.api('GetLastError'),5)
+                self.assertEqual(search('music/'),0xffffffff)
+            finally:os.chdir(previous)
+
+    def test_file_time_utc_and_dst_conversion(self):
+        source,output=self.n.alloc(16),self.n.alloc(16)
+        self.n.write(source,struct.pack('<Q',0))
+        self.assertEqual(self.api('FileTimeToSystemTime',source,output),1)
+        self.assertEqual(struct.unpack('<8H',self.n.read(output,16)),(1601,1,1,1,0,0,0,0))
+        self.n.write(source,struct.pack('<Q',0x8000000000000000))
+        self.assertEqual(self.api('FileTimeToSystemTime',source,output),0)
+        self.assertEqual(self.api('GetLastError'),87)
+        zone=self.n.alloc(172)
+        self.n.write(zone,bytes(172))
+        self.n.write(zone,struct.pack('<i',480))
+        self.n.write(zone+68,struct.pack('<8H',0,11,0,1,2,0,0,0))
+        self.n.write(zone+152,struct.pack('<8H',0,3,0,2,2,0,0,0))
+        self.n.write(zone+168,struct.pack('<i',-60))
+        for month,day,hour,minute,expected in [(3,8,9,59,(1,59)),(3,8,10,0,(3,0)),(11,1,8,59,(1,59)),(11,1,9,0,(1,0))]:
+            self.n.write(source,struct.pack('<8H',2026,month,0,day,hour,minute,0,123))
+            self.assertEqual(self.api('SystemTimeToTzSpecificLocalTime',zone,source,output),1)
+            fields=struct.unpack('<8H',self.n.read(output,16))
+            self.assertEqual(fields[4:6],expected)
+            self.assertEqual(fields[7],123)
+            self.assertEqual(self.api('SystemTimeToFileTime',source,output),1)
+            seconds=int(datetime.datetime(2026,month,day,hour,minute,tzinfo=datetime.timezone.utc).timestamp())
+            self.assertEqual(struct.unpack('<Q',self.n.read(output,8))[0],(seconds+11644473600)*10000000+1230000)
+        self.n.write(source,struct.pack('<8H',2026,2,0,30,0,0,0,0))
+        self.assertEqual(self.api('SystemTimeToFileTime',source,output),0)
+        original=os.environ.get('TZ')
+        try:
+            os.environ['TZ']='America/Los_Angeles';time.tzset()
+            self.n.write(source,struct.pack('<8H',2026,3,0,8,10,0,0,123))
+            self.assertEqual(self.api('SystemTimeToTzSpecificLocalTime',0,source,output),1)
+            self.assertEqual(struct.unpack('<8H',self.n.read(output,16))[4:6],(3,0))
+            self.assertIn(self.api('GetTimeZoneInformation',zone),(1,2))
+            self.assertEqual(self.words(zone,1),(480,))
+            self.assertEqual(self.words(zone+168,1),(0xffffffc4,))
+        finally:
+            if original is None:os.environ.pop('TZ',None)
+            else:os.environ['TZ']=original
+            time.tzset()
+
+    def test_crt_binary_stream_seeks_and_partial_items(self):
+        def crt(name,*args):
+            return self.n.call(self.n.lib.bhl_thunk(('MSVCRT.dll!'+name).encode(),None),args)
+        previous=os.getcwd()
+        with tempfile.TemporaryDirectory(prefix='bhl-stdio-',dir=ROOT/'work') as directory:
+            try:
+                os.chdir(directory)
+                Path('sample.bin').write_bytes(b'\x00\r\n\x1a\xff')
+                h=crt('fopen',self.blob(b'sample.bin\0'),self.blob(b'rb\0'))
+                self.assertNotEqual(h,0)
+                output=self.n.alloc(16)
+                self.assertEqual(crt('fread',output,2,3,h),2)
+                self.assertEqual(self.n.read(output,5),b'\x00\r\n\x1a\xff')
+                self.assertEqual(crt('ftell',h),5)
+                self.assertNotEqual(crt('feof',h),0)
+                self.assertEqual(crt('fseek',h,0xfffffffe,2),0)
+                self.assertEqual(crt('feof',h),0)
+                self.assertEqual(crt('ftell',h),3)
+                self.assertEqual(crt('fread',output,1,2,h),2)
+                self.assertEqual(self.n.read(output,2),b'\x1a\xff')
+                self.assertEqual(crt('fclose',h),0)
+                self.assertEqual(crt('fclose',h),0xffffffff)
+                self.assertEqual(self.words(crt('_errno'),1),(9,))
+                self.assertEqual(crt('fopen',self.blob(b'../escape\0'),self.blob(b'wb\0')),0)
+                self.assertEqual(self.words(crt('_errno'),1),(13,))
+            finally:os.chdir(previous)
 
     def test_virtual_reserve_commit_protection_and_decommit(self):
         p=self.api('VirtualAlloc',0,8192,0x2000,4);self.assertNotEqual(p,0)

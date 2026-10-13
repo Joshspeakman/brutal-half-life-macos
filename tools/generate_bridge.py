@@ -72,11 +72,20 @@ def main():
     header+='static void (*engine_callbacks[])(Ctx *) = {\n'+''.join(f'engine_{i},\n' for i in range(len(engine)))+'};\n'
     (out/'engine_abi.h').write_text(header)
     movement=strip_comments((upstream/'pm_shared/pm_defs.h').read_text())
-    phys,_=guest_struct(movement,'physent_t','BhlPhysent')
+    phys,physfields=guest_struct(movement,'physent_t','BhlPhysent')
     pm,fields=guest_struct(movement,'playermove_t','BhlPlayerMove')
     guest=phys+pm+'\n_Static_assert(sizeof(BhlPhysent)==224,"guest physent layout");\n'
     guest+='static void pm_copy_values(BhlPlayerMove *g,const playermove_t *h) {\n'
     guest+=''.join(f'memcpy(&g->{n},&h->{n},sizeof g->{n});\n' for n,k in fields if k=='value')+'}\n'
+    guest+='static void pm_write_values(playermove_t *h,const BhlPlayerMove *g) {\n'
+    guest+=''.join(f'memcpy(&h->{n},&g->{n},sizeof h->{n});\n' for n,k in fields if k=='value')+'}\n'
+    for direction in ('guest','host'):
+        dst,src=('g','h') if direction=='guest' else ('h','g')
+        guest+=('static void phys_to_guest(BhlPhysent *g,const physent_t *h) {\n' if direction=='guest' else 'static void phys_to_host(physent_t *h,const BhlPhysent *g) {\n')
+        for name,kind in physfields:
+            if kind=='value':guest+=f'memcpy(&{dst}->{name},&{src}->{name},sizeof {dst}->{name});\n'
+            else:guest+=f'{dst}->{name}=model_{direction}({src}->{name});\n'
+        guest+='}\n'
     pm_callbacks=[n for n,k in fields if k=='callback']
     for i,n in enumerate(pm_callbacks):
         guest+=f'#define BHL_PM_{n} {i}\nstatic void pm_{i}(Ctx *c) {{ pm_dispatch(c,{i}); }}\n'
@@ -98,6 +107,8 @@ _Static_assert(offsetof(BhlEdict,v)==128,"guest edict entvars offset");
         entities+=('static void copy_entvars_to_guest(BhlEntvars *g,const entvars_t *h) {\n' if direction=='guest'
                    else 'static void copy_entvars_to_host(entvars_t *h,const BhlEntvars *g) {\n')
         for name,kind in fields:
+            # GoldSrc declares these as int, but their values are string_t IDs.
+            if name in ('viewmodel','weaponmodel'):kind='string'
             dst,src=('g','h') if direction=='guest' else ('h','g')
             if kind=='value':entities+=f'memcpy(&{dst}->{name},&{src}->{name},sizeof {dst}->{name});\n'
             else:entities+=f'{dst}->{name}={direction}_{"edict" if kind=="pointer" else "string"}({src}->{name});\n'

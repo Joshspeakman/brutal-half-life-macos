@@ -69,7 +69,7 @@ def main():
     compiler = subprocess.check_output(["clang", "--version"])
     def compile_one(source):
         compile_flags=flags+(sdl_cflags if source.name in ('platform.c','directsound.c') else [])
-        extra = (out / 'nls_tables.h').read_bytes() if source.name == 'win32.c' else b''
+        extra = (out / 'nls_tables.h').read_bytes() + (ROOT/'runtime/guest_format.inc').read_bytes() if source.name == 'win32.c' else b''
         digest = hashlib.sha256(source.read_bytes() + headers + extra + compiler + repr(compile_flags).encode()).hexdigest()
         obj = out / (source.parent.name + "_" + source.stem + ".o")
         stamp = obj.with_suffix(".sha256")

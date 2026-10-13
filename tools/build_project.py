@@ -74,9 +74,10 @@ def main():
         run('threads','tests/test_threads.py')
         run('fmod','tests/test_fmod.py')
         run('vgui','tests/test_vgui.py')
+        run('boundaries','tests/test_boundaries.py')
         for module in MODULES:run('differential-'+module,'tests/test_startup_differential.py','--module',module)
         run('server-map','tests/test_engine.py','--map','c0a0')
-    if args.check_client:run('client-engine','tests/test_client_engine.py','--trace')
+    if args.check_client:run('client-engine','tests/test_client_engine.py','--renderer','gl','--video-driver','cocoa','--map','_zoo','--save-load','--capture-frames','25','--seconds','90')
     print('Native development build complete. Client gameplay and app packaging remain incomplete.')
 
 

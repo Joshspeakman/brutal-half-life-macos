@@ -23,6 +23,8 @@ static void bridge_missing(const char *direction,unsigned slot);
 static void engine_dispatch(Ctx *c,unsigned slot);
 static void pm_dispatch(Ctx *c,unsigned slot);
 #include "engine_abi.h"
+#define BHL_MODEL_NAMESPACE "server-model!"
+#include "model_bridge.inc"
 #define BHL_PM_NAMESPACE "server-movement!"
 #include "guest_movement.h"
 extern int bhl_heap_free(uint32_t);
@@ -39,7 +41,10 @@ static uint32_t *private_data;
 static unsigned edict_capacity;
 #define STRING_CAPACITY (4*1024*1024u)
 typedef struct StringEntry { uint32_t offset; struct StringEntry *next; } StringEntry;
-static StringEntry *strings;
+static StringEntry *strings[4096];
+typedef struct StringMap {uint32_t guest;int host;struct StringMap *next;} StringMap;
+static StringMap *host_strings[4096],*guest_string_ids[4096];
+static unsigned string_bucket(uint32_t id){return (id*2654435761u)>>20;}
 static void ensure_entities(void)
 {
     if(guest_edicts)return;
@@ -67,14 +72,22 @@ static uint32_t guest_string(int id)
 {
     if(!id)return 0;ensure_entities();const char *text=engine.pfnSzFromIndex(id);
     if(!text||!*text)return 0;
-    for(StringEntry *e=strings;e;e=e->next)if(!strcmp((char*)G_MEM+guest_strings+e->offset,text))return e->offset;
-    size_t length=strlen(text)+1;if(length>STRING_CAPACITY-string_used)abort();
-    StringEntry *e=calloc(1,sizeof *e);if(!e)abort();e->offset=string_used;e->next=strings;strings=e;
-    memcpy(G_MEM+guest_strings+string_used,text,length);string_used+=(uint32_t)length;return e->offset;
+    unsigned slot=string_bucket(id);StringMap *m=host_strings[slot];while(m&&m->host!=id)m=m->next;
+    if(m&&!strcmp((char*)G_MEM+guest_strings+m->guest,text))return m->guest;
+    unsigned hash=2166136261u;for(const unsigned char *p=(const void*)text;*p;p++)hash=(hash^*p)*16777619u;hash&=4095;
+    StringEntry *e=strings[hash];while(e&&strcmp((char*)G_MEM+guest_strings+e->offset,text))e=e->next;
+    if(!e){size_t length=strlen(text)+1;if(length>STRING_CAPACITY-string_used)abort();
+        e=calloc(1,sizeof *e);if(!e)abort();e->offset=string_used;e->next=strings[hash];strings[hash]=e;
+        memcpy(G_MEM+guest_strings+string_used,text,length);string_used+=(uint32_t)length;}
+    if(!m){m=calloc(1,sizeof *m);if(!m)abort();m->host=id;m->next=host_strings[slot];host_strings[slot]=m;}m->guest=e->offset;return e->offset;
 }
 static int host_string(uint32_t id)
 {
-    if(!id)return 0;return engine.pfnAllocString((char*)G_MEM+(uint32_t)(guest_strings+id));
+    if(!id)return 0;const char *text=(char*)G_MEM+(uint32_t)(guest_strings+id);unsigned slot=string_bucket(id);
+    StringMap *m=guest_string_ids[slot];while(m&&m->guest!=id)m=m->next;
+    if(m){const char *existing=engine.pfnSzFromIndex(m->host);if(existing&&!strcmp(existing,text))return m->host;}
+    else{m=calloc(1,sizeof *m);if(!m)abort();m->guest=id;m->next=guest_string_ids[slot];guest_string_ids[slot]=m;}
+    m->host=engine.pfnAllocString(text);return m->host;
 }
 static void pull_entities(void)
 {
@@ -84,6 +97,7 @@ static void pull_entities(void)
         g->free=h->free;g->serialnumber=h->serialnumber;g->headnode=h->headnode;g->num_leafs=h->num_leafs;
         memcpy(g->leafnums,h->leafnums16,sizeof g->leafnums);g->freetime=h->freetime;
         g->pvPrivateData=h->pvPrivateData?private_data[i]:0;
+        if(h->free&&!h->pvPrivateData)continue;
         copy_entvars_to_guest(&g->v,&h->v);
     }
 }
@@ -92,6 +106,7 @@ static void push_entities(void)
     if(!guest_edicts)return;
     for(unsigned i=0;i<edict_capacity;i++){
         BhlEdict *g=(void*)(G_MEM+guest_edicts+i*sizeof *g);edict_t *h=edict_base+i;
+        if(h->free&&!h->pvPrivateData)continue;
         copy_entvars_to_host(&h->v,&g->v);
     }
 }
@@ -139,6 +154,7 @@ static uint32_t copy_string(const char *s)
     if(!s)return 0;size_t n=strlen(s)+1;uint32_t p=bhl_heap_alloc((uint32_t)n,0);
     if(!p)abort();memcpy(G_MEM+p,s,n);return p;
 }
+#include "save_bridge.inc"
 typedef struct InfoBuffer {char *host;uint32_t guest;unsigned capacity;struct InfoBuffer *next;} InfoBuffer;
 static InfoBuffer *info_buffers;
 static uint32_t info_copy(char *host,unsigned capacity)
@@ -181,21 +197,31 @@ static void sync_basic_globals(void)
     memcpy(G_MEM+guest_globals+120,&host_globals->trace_inopen,32);
     rt_w32(G_MEM,guest_globals+152,guest_strings);
     memcpy(G_MEM+guest_globals+160,host_globals->vecLandmarkOffset,12);
-    if(host_globals->pSaveData){fprintf(stderr,"BHL native bridge: save-state structure conversion is not implemented\n");abort();}
+    rt_w32(G_MEM,guest_globals+156,save_global_pull());
     rt_w32(G_MEM,guest_globals+144,host_globals->maxClients);
     rt_w32(G_MEM,guest_globals+148,host_globals->maxEntities);
     for(CvarBridge *v=cvars;v;v=v->next)sync_cvar(v);
+}
+static void push_globals(void)
+{
+    if(!guest_globals||!guest_edicts)return;
+    memcpy(host_globals,G_MEM+guest_globals,116);
+    host_globals->mapname=host_string(rt_r32(G_MEM,guest_globals+12));host_globals->startspot=host_string(rt_r32(G_MEM,guest_globals+16));
+    host_globals->trace_ent=host_edict(rt_r32(G_MEM,guest_globals+116));
+    memcpy(&host_globals->trace_inopen,G_MEM+guest_globals+120,32);
+    memcpy(host_globals->vecLandmarkOffset,G_MEM+guest_globals+160,12);
+    save_global_push();
 }
 static uint32_t server_call(unsigned slot,const uint32_t *args,unsigned n)
 {
     sync_basic_globals();pull_info();
     uint32_t result=bhl_invoke(rt_r32(G_MEM,guest_api+4*slot),args,n,0);
-    push_entities();push_info();return result;
+    push_entities();push_globals();push_info();return result;
 }
 #include "server_scalar_callbacks.h"
 static uint32_t command_functions[32];
 static unsigned command_count;
-#define COMMAND(n) static void command_##n(void){sync_basic_globals();bhl_invoke(command_functions[n],NULL,0,0);}
+#define COMMAND(n) static void command_##n(void){sync_basic_globals();bhl_invoke(command_functions[n],NULL,0,0);push_entities();push_globals();push_info();}
 COMMAND(0) COMMAND(1) COMMAND(2) COMMAND(3) COMMAND(4) COMMAND(5) COMMAND(6) COMMAND(7)
 COMMAND(8) COMMAND(9) COMMAND(10) COMMAND(11) COMMAND(12) COMMAND(13) COMMAND(14) COMMAND(15)
 COMMAND(16) COMMAND(17) COMMAND(18) COMMAND(19) COMMAND(20) COMMAND(21) COMMAND(22) COMMAND(23)
@@ -209,8 +235,16 @@ static void (*commands[])(void)={command_0,command_1,command_2,command_3,command
 static void engine_dispatch(Ctx *c,unsigned slot)
 {
     if(getenv("BHL_BRIDGE_TRACE"))fprintf(stderr,"engine %s\n",engine_names[slot]);
-    push_entities();push_info();
+    push_entities();push_globals();push_info();
     switch(slot){
+    case BHL_ENG_pfnFunctionFromName:RET(save_function_address(gs(A(0))));
+    case BHL_ENG_pfnNameForFunction:RET(save_function_name(A(0)));
+    case BHL_ENG_pfnCRC32_Init:engine.pfnCRC32_Init((CRC32_t*)gs(A(0)));RET(0);
+    case BHL_ENG_pfnCRC32_ProcessBuffer:engine.pfnCRC32_ProcessBuffer((CRC32_t*)gs(A(0)),gs(A(1)),A(2));RET(0);
+    case BHL_ENG_pfnCRC32_ProcessByte:engine.pfnCRC32_ProcessByte((CRC32_t*)gs(A(0)),A(1));RET(0);
+    case BHL_ENG_pfnCRC32_Final:RET(engine.pfnCRC32_Final(A(0)));
+    case BHL_ENG_pfnCheckParm:{char *next=NULL;int r=engine.pfnCheckParm(gs(A(0)),A(1)?&next:NULL);if(A(1))rt_w32(G_MEM,A(1),copy_string(next));RET(r);}
+    case BHL_ENG_pfnCvar_DirectSet:{CvarBridge *v=cvars;while(v&&v->guest!=A(0))v=v->next;if(!v)bridge_missing("engine",slot);engine.pfnCvar_DirectSet(v->host,gs(A(1)));RET(0);}
     case BHL_ENG_pfnSetFatPVS:case BHL_ENG_pfnSetFatPAS:{
         unsigned i=slot==BHL_ENG_pfnSetFatPAS;byte *mask=i?engine.pfnSetFatPAS((float*)gs(A(0))):engine.pfnSetFatPVS((float*)gs(A(0)));if(!mask)RET(0);
         const unsigned bytes=(MAX_MAP_LEAFS+7)/8; /* Pinned engine owns static arrays of exactly this size. */
@@ -303,34 +337,43 @@ static void game_init(void) { server_call(BHL_DLL_pfnGameInit,NULL,0);fprintf(st
 static const char *game_description(void) { return gs(server_call(BHL_DLL_pfnGetGameDescription,NULL,0)); }
 static int lag_compensation(void) { return server_call(BHL_DLL_pfnAllowLagCompensation,NULL,0); }
 static void reset_global_state(void) { server_call(BHL_DLL_pfnResetGlobalState,NULL,0); }
+static void save_fields(SAVERESTOREDATA *context,const char *name,void *data,TYPEDESCRIPTION *fields,int count,int read)
+{
+    if(count<0||count>4096)save_fault("field count");SaveMirror *p=save_begin(context);
+    unsigned bytes=0;for(int i=0;i<count;i++){
+        if(fields[i].fieldSize<0||fields[i].fieldOffset<0)save_fault("field bounds");
+        bytes=(bytes+3)&~3u;bytes+=save_field_size(fields[i].fieldType,0)*fields[i].fieldSize;
+        if(bytes>16*1024*1024)save_fault("field payload size");
+    }
+    uint32_t description=bhl_heap_alloc(count*sizeof(BhlSaveField),1),payload=bhl_heap_alloc(bytes?bytes:4,1);unsigned offset=0;
+    for(int i=0;i<count;i++){
+        BhlSaveField *g=(void*)(G_MEM+description+i*sizeof *g);TYPEDESCRIPTION *h=fields+i;
+        offset=(offset+3)&~3u;g->type=h->fieldType;g->name=save_text(h->fieldName);g->offset=offset;g->count=h->fieldSize;g->flags=h->flags;
+        save_field_copy((char*)data+h->fieldOffset,payload+offset,h->fieldType,h->fieldSize,1);offset+=save_field_size(h->fieldType,0)*h->fieldSize;
+    }
+    uint32_t args[]={p->guest,save_text(name),payload,description,count};server_call(read?BHL_DLL_pfnSaveReadFields:BHL_DLL_pfnSaveWriteFields,args,5);save_end(p);
+    if(read)for(int i=0;i<count;i++){BhlSaveField *g=(void*)(G_MEM+description+i*sizeof *g);save_field_copy((char*)data+fields[i].fieldOffset,payload+g->offset,fields[i].fieldType,fields[i].fieldSize,0);}
+    bhl_heap_free(payload);bhl_heap_free(description);
+}
+static void save_write_fields(SAVERESTOREDATA *s,const char *n,void *d,TYPEDESCRIPTION *f,int c){save_fields(s,n,d,f,c,0);}
+static void save_read_fields(SAVERESTOREDATA *s,const char *n,void *d,TYPEDESCRIPTION *f,int c){save_fields(s,n,d,f,c,1);}
+static void save_entity(edict_t *h,SAVERESTOREDATA *s)
+{SaveMirror *p=save_begin(s);uint32_t args[]={guest_edict(h),p->guest};server_call(BHL_DLL_pfnSave,args,2);save_end(p);}
+static int restore_entity(edict_t *h,SAVERESTOREDATA *s,int global)
+{SaveMirror *p=save_begin(s);uint32_t args[]={guest_edict(h),p->guest,global};int r=server_call(BHL_DLL_pfnRestore,args,3);save_end(p);return r;}
+static void save_global_state(SAVERESTOREDATA *s)
+{SaveMirror *p=save_begin(s);server_call(BHL_DLL_pfnSaveGlobalState,&p->guest,1);save_end(p);}
+static void restore_global_state(SAVERESTOREDATA *s)
+{SaveMirror *p=save_begin(s);server_call(BHL_DLL_pfnRestoreGlobalState,&p->guest,1);save_end(p);}
 static void register_encoders(void) { server_call(BHL_DLL_pfnRegisterEncoders,NULL,0);fprintf(stderr,"BHL v3 registered all three native delta encoders\n"); }
 static int hull_bounds(int hull,float *mins,float *maxs)
 {
     uint32_t p=bhl_heap_alloc(24,0);memcpy(G_MEM+p,mins,12);memcpy(G_MEM+p+12,maxs,12);
     uint32_t args[]={(uint32_t)hull,p,p+12};int result=server_call(BHL_DLL_pfnGetHullBounds,args,3);
-    memcpy(mins,G_MEM+p,12);memcpy(maxs,G_MEM+p+12,12);bhl_heap_free(p);return result;
+    memcpy(mins,G_MEM+p,12);memcpy(maxs,G_MEM+p+12,12);bhl_heap_free(p);
+    if(getenv("BHL_VIEW_TRACE"))fprintf(stderr,"BHL hullbounds server %d result=%d min=%.1f,%.1f,%.1f max=%.1f,%.1f,%.1f\n",hull,result,mins[0],mins[1],mins[2],maxs[0],maxs[1],maxs[2]);return result;
 }
-static void pm_dispatch(Ctx *c,unsigned slot)
-{
-    if(getenv("BHL_BRIDGE_TRACE"))fprintf(stderr,"movement %s\n",pm_names[slot]);
-    switch(slot){
-    case BHL_PM_COM_FileSize:RET(host_pmove->COM_FileSize(gs(A(0))));
-    case BHL_PM_COM_LoadFile:{
-        int n=0;byte *file=host_pmove->COM_LoadFile(gs(A(0)),A(1),&n);
-        if(A(2))rt_w32(G_MEM,A(2),n);if(!file)RET(0);
-        if(n<0)abort();uint32_t p=bhl_heap_alloc((uint32_t)n+1,1);if(!p)abort();
-        memcpy(G_MEM+p,file,n);host_pmove->COM_FreeFile(file);RET(p);
-    }
-    case BHL_PM_COM_FreeFile:if(!bhl_heap_free(A(0)))abort();RET(0);
-    case BHL_PM_memfgets:{
-        uint32_t p=A(0),offset=A(2),buffer=A(3);int pos=(int)rt_r32(G_MEM,offset),size=(int)A(1),cap=(int)A(4);
-        if(!p||!offset||!buffer||cap<=0||pos<0||pos>=size)RET(0);
-        int n=0;while(pos<size&&n<cap-1){char ch=G_MEM[p+pos++];G_MEM[buffer+n++]=ch;if(ch=='\n')break;}
-        G_MEM[buffer+n]=0;rt_w32(G_MEM,offset,pos);RET(buffer);
-    }
-    default:fprintf(stderr,"BHL native bridge: unimplemented movement callback %s\n",pm_names[slot]);abort();
-    }
-}
+#include "movement_bridge.inc"
 static void movement_init(playermove_t *move)
 {
     host_pmove=move;
@@ -342,11 +385,14 @@ static void movement_init(playermove_t *move)
     fprintf(stderr,"BHL v3 PM_Init completed through native movement callbacks\n");
 }
 
+static void movement_run(playermove_t *move,qboolean server)
+{movement_pull(move);uint32_t args[]={guest_pmove,server};server_call(BHL_DLL_pfnPM_Move,args,2);movement_push();}
+
 static void link_entity(uint32_t function,entvars_t *pev)
 {
     edict_t *h=(edict_t*)((char*)pev - offsetof(edict_t,v));
     sync_basic_globals();uint32_t arg=guest_edict(h)+offsetof(BhlEdict,v);
-    bhl_invoke(function,&arg,1,0);push_entities();
+    bhl_invoke(function,&arg,1,0);push_entities();push_globals();
 }
 #include "entity_exports.h"
 static void key_value(edict_t *entity,KeyValueData *key)
@@ -382,7 +428,7 @@ static int add_full_pack(entity_state_t *state,int index,edict_t *entity,edict_t
     uint32_t p=bhl_heap_alloc(sizeof *state,0),args[]={p,index,guest_edict(entity),guest_edict(host),flags,player,mask};memcpy(G_MEM+p,state,sizeof *state);
     int result=server_call(BHL_DLL_pfnAddToFullPack,args,7);memcpy(state,G_MEM+p,sizeof *state);bhl_heap_free(p);return result;
 }
-static void server_deactivate(void){server_call(BHL_DLL_pfnServerDeactivate,NULL,0);}
+static void server_deactivate(void){server_call(BHL_DLL_pfnServerDeactivate,NULL,0);model_invalidate();}
 static unsigned frame_count;
 static void server_activate(edict_t *list,int count,int clients)
 {
@@ -405,7 +451,7 @@ static void create_baseline(int player,int index,entity_state_t *baseline,edict_
 static uint32_t new_call(unsigned slot,const uint32_t *args,unsigned count)
 {
     sync_basic_globals();uint32_t fn=rt_r32(G_MEM,guest_new_api+4*slot);
-    uint32_t result=bhl_invoke(fn,args,count,0);push_entities();return result;
+    uint32_t result=bhl_invoke(fn,args,count,0);push_entities();push_globals();return result;
 }
 static void free_private(edict_t *entity)
 {
@@ -443,13 +489,15 @@ __attribute__((visibility("default"))) int GetEntityAPI(DLL_FUNCTIONS *out,int v
     if(!bhl_invoke(bhl_export("hl.dll","GetEntityAPI"),args,2,0))return 0;
     fill_missing(out);fill_scalar_server(out);out->pfnGameInit=game_init;out->pfnGetGameDescription=game_description;
     out->pfnAllowLagCompensation=lag_compensation;out->pfnResetGlobalState=reset_global_state;
-    out->pfnGetHullBounds=hull_bounds;out->pfnPM_Init=movement_init;
+    out->pfnGetHullBounds=hull_bounds;out->pfnPM_Init=movement_init;out->pfnPM_Move=movement_run;
     out->pfnRegisterEncoders=register_encoders;out->pfnKeyValue=key_value;out->pfnSpawn=spawn_entity;out->pfnServerDeactivate=server_deactivate;
     out->pfnServerActivate=server_activate;out->pfnStartFrame=start_frame;
     out->pfnCreateBaseline=create_baseline;
     out->pfnClientUserInfoChanged=client_userinfo;out->pfnClientConnect=client_connect;
     out->pfnUpdateClientData=update_client_data;out->pfnGetWeaponData=weapon_data;out->pfnCmdStart=cmd_start;
     out->pfnSetupVisibility=setup_visibility;out->pfnAddToFullPack=add_full_pack;
+    out->pfnSave=save_entity;out->pfnRestore=restore_entity;out->pfnSaveWriteFields=save_write_fields;out->pfnSaveReadFields=save_read_fields;
+    out->pfnSaveGlobalState=save_global_state;out->pfnRestoreGlobalState=restore_global_state;
     return 1;
 }
 __attribute__((visibility("default"))) int GetEntityAPI2(DLL_FUNCTIONS *out,int *version)
