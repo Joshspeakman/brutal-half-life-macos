@@ -14,7 +14,9 @@ from generate_nls import generate as generate_nls
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("modules", nargs="+", choices=list(PROFILE['modules']))
-    ap.add_argument("--opt", choices=["0", "1", "2"], default="1")
+    ap.add_argument("--opt", choices=["0", "1", "2"], default="2")
+    ap.add_argument("--lto", action=argparse.BooleanOptionalAction, default=True,
+                    help="Enable ThinLTO across translated modules (default; --no-lto disables it)")
     args = ap.parse_args()
     out = ROOT / "work/native"
     out.mkdir(parents=True, exist_ok=True)
@@ -65,6 +67,7 @@ def main():
     flags = ["clang", "-arch", "arm64", "-std=gnu11", f"-O{args.opt}", "-g",
              "-ffp-contract=off", "-fno-strict-aliasing", "-Wno-unused-value",
              "-I", str(ROOT / "runtime"), "-I", str(out)]
+    if args.lto:flags += ['-flto=thin']
     headers = b''.join(p.read_bytes() for p in sorted((ROOT / "runtime").glob("*.h")))
     compiler = subprocess.check_output(["clang", "--version"])
     def compile_one(source):
@@ -83,12 +86,12 @@ def main():
     with ThreadPoolExecutor(max_workers=min(4, os.cpu_count() or 1)) as pool:
         objects = list(pool.map(compile_one, sources))
     staged = out / "libbhl.new.dylib"
-    subprocess.run(["clang", "-arch", "arm64", "-dynamiclib", *map(str, objects), *sdl_libs, "-liconv", "-framework", "CoreFoundation", "-framework", "CoreText", "-framework", "CoreGraphics",
+    subprocess.run(["clang", "-arch", "arm64", "-dynamiclib", *(['-flto=thin'] if args.lto else []), *map(str, objects), *sdl_libs, "-liconv", "-framework", "CoreFoundation", "-framework", "CoreText", "-framework", "CoreGraphics",
                     "-install_name", "@rpath/libbhl.dylib", "-o", str(staged)], check=True)
     subprocess.run(["codesign", "--force", "--sign", "-", str(staged)], check=True)
     staged.replace(out / "libbhl.dylib")
     (out / "build.json").write_text(json.dumps(dict(modules=args.modules, functions=len(functions),
-        imports=len(imports), architecture="arm64", optimization=args.opt, gameplay_tested=False), indent=2) + "\n")
+        imports=len(imports), architecture="arm64", optimization=args.opt, thin_lto=args.lto, gameplay_tested=False), indent=2) + "\n")
     print(f"Linked {len(functions)} functions and {len(imports)} imports; gameplay validation pending")
 
 

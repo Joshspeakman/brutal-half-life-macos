@@ -1,0 +1,102 @@
+diff --git a/engine/client/cl_efx.c b/engine/client/cl_efx.c
+index 7352c3a..936f17c 100644
+--- a/engine/client/cl_efx.c
++++ b/engine/client/cl_efx.c
+@@ -29,6 +29,22 @@ static particle_t	*cl_active_particles;
+ static particle_t	*cl_active_tracers;
+ static particle_t	*cl_free_particles;
+ static particle_t	*cl_particles = NULL;	// particle pool
++/* Optional native ABI adapter query. Zero means free; each allocation gets
++ * a new nonzero identity, including native effects and beam trails. */
++static unsigned int *cl_particle_activity;
++static unsigned int cl_particle_activity_count, cl_particle_activity_serial;
++int EXPORT Xash_GetParticlePoolV1( const particle_t **base, const unsigned int **activity, unsigned int *count )
++{
++	*base = cl_particles;
++	*activity = cl_particle_activity;
++	*count = cl_particle_activity_count;
++	return 1;
++}
++static void CL_MarkParticleAllocated( particle_t *p )
++{
++	if( !++cl_particle_activity_serial ) ++cl_particle_activity_serial;
++	cl_particle_activity[p - cl_particles] = cl_particle_activity_serial;
++}
+ static vec3_t	cl_avelocities[NUMVERTEXNORMALS];
+ static float	cl_lasttimewarn = 0.0f;
+ 
+@@ -87,6 +103,8 @@ CL_InitParticles
+ void CL_InitParticles( void )
+ {
+ 	cl_particles = Mem_Calloc( cls.mempool, sizeof( particle_t ) * GI->max_particles );
++	cl_particle_activity_count = GI->max_particles;
++	cl_particle_activity = Mem_Calloc( cls.mempool, sizeof( *cl_particle_activity ) * cl_particle_activity_count );
+ 	CL_ClearParticles ();
+ 
+ 	// this is used for EF_BRIGHTFIELD
+@@ -112,6 +130,7 @@ void CL_ClearParticles( void )
+ {
+ 	if( !cl_particles ) return;
+ 
++	memset( cl_particle_activity, 0, sizeof( *cl_particle_activity ) * cl_particle_activity_count );
+ 	cl_free_particles = cl_particles;
+ 	cl_active_particles = NULL;
+ 	cl_active_tracers = NULL;
+@@ -133,6 +152,9 @@ void CL_FreeParticles( void )
+ 	if( cl_particles )
+ 		Mem_Free( cl_particles );
+ 	cl_particles = NULL;
++	if( cl_particle_activity ) Mem_Free( cl_particle_activity );
++	cl_particle_activity = NULL;
++	cl_particle_activity_count = 0;
+ }
+ 
+ /*
+@@ -150,6 +172,7 @@ particle_t *CL_AllocParticleFast( void )
+ 	{
+ 		p = cl_free_particles;
+ 		cl_free_particles = p->next;
++		CL_MarkParticleAllocated( p );
+ 	}
+ 
+ 	return p;
+@@ -185,6 +208,7 @@ particle_t * GAME_EXPORT R_AllocParticle( void (*callback)( particle_t*, float )
+ 
+ 	p = cl_free_particles;
+ 	cl_free_particles = p->next;
++	CL_MarkParticleAllocated( p );
+ 	p->next = cl_active_particles;
+ 	cl_active_particles = p;
+ 
+@@ -236,6 +260,7 @@ static particle_t *R_AllocTracer( const vec3_t org, const vec3_t vel, float life
+ 
+ 	p = cl_free_particles;
+ 	cl_free_particles = p->next;
++	CL_MarkParticleAllocated( p );
+ 	p->next = cl_active_tracers;
+ 	cl_active_tracers = p;
+ 
+@@ -1954,6 +1979,7 @@ void R_FreeDeadParticles( particle_t **ppparticles )
+ 			*ppparticles = kill->next;
+ 			kill->next = cl_free_particles;
+ 			cl_free_particles = kill;
++			cl_particle_activity[kill - cl_particles] = 0;
+ 			continue;
+ 		}
+ 		break;
+@@ -1973,6 +1999,7 @@ void R_FreeDeadParticles( particle_t **ppparticles )
+ 				p->next = kill->next;
+ 				kill->next = cl_free_particles;
+ 				cl_free_particles = kill;
++				cl_particle_activity[kill - cl_particles] = 0;
+ 				continue;
+ 			}
+ 			break;
+@@ -2032,6 +2059,7 @@ void CL_ReadPointFile_f( void )
+ 		// may be executed from the console, while frametime is 0
+ 		particle_t *p = cl_free_particles;
+ 		cl_free_particles = p->next;
++		CL_MarkParticleAllocated( p );
+ 		p->next = cl_active_particles;
+ 		cl_active_particles = p;
+ 

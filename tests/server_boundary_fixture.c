@@ -13,6 +13,47 @@ static int packet_visibility(const edict_t *entity,byte *set){assert(entity==fix
 static void packet_group(int mask,int operation){assert(operation==0);fixture_group=mask;}
 static int packet_index(const edict_t *entity){return entity-fixture_edicts;}
 static int packet_model(const char *name){return *name?17:0;}
+static void *fixture_model_data;
+static void *get_model(edict_t *entity)
+{assert(entity==fixture_edicts+1&&entity->v.modelindex==17&&entity->v.health==0);return fixture_model_data;}
+static void collision_equivalence(void)
+{
+    edict_t *h=fixture_edicts+1;entvars_t initial=h->v;
+    uint32_t arg=guest_edict(h),object=bhl_heap_alloc(16,1),table=bhl_heap_alloc(64,1);
+    rt_w32(G_MEM,object,table);rt_w32(G_MEM,object+4,arg+offsetof(BhlEdict,v));rt_w32(G_MEM,table+0x30,0x10045bb0);
+    for(unsigned scenario=0;scenario<4;scenario++){
+        initial.solid=scenario&1?SOLID_BSP:SOLID_BBOX;initial.angles[1]=scenario&1?45:0;
+        initial.origin[0]=20;initial.origin[2]=100;
+        for(unsigned j=0;j<3;j++){initial.mins[j]=-8-(int)j;initial.maxs[j]=12+j;}
+        h->pvPrivateData=scenario&2?(void*)1:NULL;private_data[1]=scenario&2?object:0;
+        h->v=initial;server_call_full(BHL_DLL_pfnSetAbsBox,&arg,1);entvars_t expected=h->v;
+        h->v=initial;server_call(BHL_DLL_pfnSetAbsBox,&arg,1);
+        assert(!memcmp(&h->v,&expected,sizeof expected));assert(h->v.absmin[0]<h->v.origin[0]&&h->v.absmax[2]>h->v.origin[2]);
+    }
+    h->pvPrivateData=NULL;private_data[1]=0;bhl_heap_free(object);bhl_heap_free(table);
+    puts("Original collision callback equivalence passed: base object, no object, rotated BSP, bounding box");
+}
+static void message_begin(int dest,int type,const float *origin,edict_t *recipient)
+{assert(dest==MSG_ONE&&type==99&&!origin&&recipient==fixture_edicts+1);assert(recipient->v.health==10);}
+static void message_end(void){assert(fixture_edicts[1].v.health==42&&host_globals->trace_flags==83);}
+static void make_vectors(const float *angles)
+{assert(angles[0]==17);for(unsigned i=0;i<3;i++){host_globals->v_forward[i]=i+1;host_globals->v_up[i]=i+7;host_globals->v_right[i]=i+4;}}
+static void message_boundaries(void)
+{
+    engine.pfnMessageBegin=message_begin;engine.pfnMessageEnd=message_end;engine.pfnMakeVectors=make_vectors;
+    fixture_edicts[1].v.health=10;sync_basic_globals();
+    BhlEdict *g=(void*)(G_MEM+guest_edict(fixture_edicts+1));g->v.health=42;rt_w32(G_MEM,guest_globals+132,83);
+    Ctx c={0};uint32_t sp=bhl_heap_alloc(32,1);c.esp=sp;
+    rt_w32(G_MEM,sp+4,MSG_ONE);rt_w32(G_MEM,sp+8,99);rt_w32(G_MEM,sp+12,0);rt_w32(G_MEM,sp+16,guest_edict(fixture_edicts+1));
+    engine_dispatch(&c,BHL_ENG_pfnMessageBegin);assert(g->v.health==42&&fixture_edicts[1].v.health==10);
+    c.esp=sp;engine_dispatch(&c,BHL_ENG_pfnMessageEnd);assert(g->v.health==42&&fixture_edicts[1].v.health==42);
+    g->v.health=53;uint32_t angles=bhl_heap_alloc(12,1);rt_wf32(G_MEM,angles,17);c.esp=sp;rt_w32(G_MEM,sp+4,angles);
+    engine_dispatch(&c,BHL_ENG_pfnMakeVectors);
+    assert(g->v.health==53&&fixture_edicts[1].v.health==42);
+    assert(!memcmp(G_MEM+guest_globals+offsetof(globalvars_t,v_forward),host_globals->v_forward,3*sizeof(vec3_t)));
+    bhl_heap_free(sp);bhl_heap_free(angles);push_entities();
+    puts("Message and vector boundaries passed: pending writes survive and routing receives current state");
+}
 static void packet_snapshot_equivalence(void)
 {
     engine.pfnCheckVisibility=packet_visibility;engine.pfnSetGroupMask=packet_group;
@@ -110,9 +151,16 @@ int main(void)
     sync_basic_globals();push_entities();push_globals();unsigned before=allocations;
     for(unsigned i=0;i<100;i++){sync_basic_globals();push_entities();push_globals();}
     assert(allocations==before);
+    BhlEdict *unused=(void*)(G_MEM+guest_edict(fixture_edicts+7));
+    fixture_edicts[7].serialnumber=41;fixture_edicts[7].leafnums16[3]=93;pull_entities();
+    assert(unused->serialnumber==41&&unused->leafnums[3]==93);
+    unused->serialnumber=7;unused->leafnums[3]=18;pull_entities();
+    assert(unused->serialnumber==41&&unused->leafnums[3]==93);
     int original=fixture_edicts[1].v.classname;strcpy(fixture_strings+original,"crayer");
     sync_basic_globals();assert(!strcmp(gs(guest_strings+g->v.classname),"crayer"));
     save_roundtrip();
+    collision_equivalence();
+    message_boundaries();
     packet_snapshot_equivalence();
     edict_t replacement[16]={0};uint32_t identity=guest_edict(fixture_edicts+1);
     fixture_edicts=replacement;globals.maxEntities=16;fixture_edicts[1].v.origin[2]=321;
@@ -128,6 +176,9 @@ int main(void)
     query.esp=sp;rt_w32(G_MEM,sp+4,0);rt_w32(G_MEM,sp+8,origin);rt_wf32(G_MEM,sp+12,12);
     engine_dispatch(&query,BHL_ENG_pfnFindEntityInSphere);
     assert(query.eax==identity&&g->v.health==123&&fixture_edicts[1].v.health==0);
+    fixture_model_data=model;engine.pfnGetModelPtr=get_model;g->v.modelindex=17;
+    query.esp=sp;rt_w32(G_MEM,sp+4,identity);engine_dispatch(&query,BHL_ENG_pfnGetModelPtr);
+    assert(query.eax==mg&&g->v.health==123&&fixture_edicts[1].v.health==0&&fixture_edicts[1].v.modelindex==17);
     tank_sprite_lifetime();
     puts("Server boundaries passed: string IDs, viewmodels, globals, allocation reuse");return 0;
 }

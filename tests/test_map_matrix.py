@@ -29,7 +29,8 @@ def main():
     available={p.stem:p for p in (mod/'maps').glob('*.bsp')}
     selected=args.maps or sorted(available)
     if set(selected)-set(available) or any(not re.fullmatch('[A-Za-z0-9_-]+',m) for m in selected):ap.error('Unknown map')
-    binaries=['work/session/bhl/dlls/libbhl.dylib','work/session/bhl/dlls/hl_arm64.dylib','work/session/bhl/cl_dlls/client_arm64.dylib']
+    binaries=['work/session/bhl/dlls/libbhl.dylib','work/session/bhl/dlls/hl_arm64.dylib','work/session/bhl/cl_dlls/client_arm64.dylib',
+              'work/session/libxash.dylib','work/session/libref_gl.dylib']
     hashes={p:hashlib.sha256((session/p.removeprefix('work/session/')).read_bytes()).hexdigest() for p in binaries}
     key=hashlib.sha256(json.dumps(hashes,sort_keys=True).encode()).hexdigest()[:16]
     out=ROOT/'work/reports/maps'/key;out.mkdir(parents=True,exist_ok=True)

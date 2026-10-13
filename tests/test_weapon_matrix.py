@@ -25,7 +25,8 @@ def main():
     available=sorted(e.name.decode() for e in pe.DIRECTORY_ENTRY_EXPORT.symbols if e.name and e.name.startswith(b'weapon_'))
     selected=args.weapons or available
     if set(selected)-set(available):ap.error('Unknown original weapon export')
-    libraries=['work/session/bhl/dlls/libbhl.dylib','work/session/bhl/dlls/hl_arm64.dylib','work/session/bhl/cl_dlls/client_arm64.dylib']
+    libraries=['work/session/bhl/dlls/libbhl.dylib','work/session/bhl/dlls/hl_arm64.dylib','work/session/bhl/cl_dlls/client_arm64.dylib',
+               'work/session/libxash.dylib','work/session/libref_gl.dylib']
     report=dict(binary_hashes={p:hashlib.sha256((ROOT/p).read_bytes()).hexdigest() for p in libraries},requested=selected,batches=[],passed=False,gameplay_validated=False)
     key=hashlib.sha256(json.dumps(report['binary_hashes'],sort_keys=True).encode()).hexdigest()[:16]
     out=ROOT/'work/reports/weapons'/key;out.mkdir(parents=True,exist_ok=True)

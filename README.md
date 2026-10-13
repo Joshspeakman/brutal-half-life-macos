@@ -56,8 +56,16 @@ menu artwork. It does not require Homebrew at launch. It is a local build from
 owned inputs, not an artifact to distribute.
 
 The launcher offers the game menu, campaign hub, weapon showcase, and latest
-save, plus resolution, fullscreen and difficulty. The Controls button explains
+save, plus resolution, fullscreen, difficulty, a frame limit and VSync. The
+default frame limit is 120 FPS; this is a ceiling, not a sustained-performance
+guarantee. A 60 FPS limit and uncapped mode (engine ceiling: 1,000 FPS) are also
+available. The Controls button explains
 v3's bindings; detailed input/audio/video settings remain in the game menu.
+
+The translated runtime builds at `-O2` with ThinLTO. The adapters avoid
+unnecessary world-state copies, validate cached model identities, and track
+native particle allocation lifetimes. See [performance notes](docs/PERFORMANCE.md)
+for measurements, reproduction commands and the remaining CPU bottleneck.
 
 ## Verified progress
 

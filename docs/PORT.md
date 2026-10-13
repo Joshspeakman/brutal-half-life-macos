@@ -129,8 +129,10 @@ and cache entity/model identity lookups, preserving the existing state
 comparisons and writes. Entity pool replacement clears cached host identities;
 model epochs still invalidate borrowed data. Boundary tests exercise more
 identities than cache slots, pending writes, entity relocation and model reset.
-This improves the measured hub scene, but broader frame-time and campaign
-performance validation remains necessary.
+The translated runtime also uses `-O2` and ThinLTO. Further scoped boundaries,
+particle allocation tracking and measured results are described in
+[performance notes](PERFORMANCE.md). Full campaign performance validation
+remains necessary.
 
 The server uses 159 engine entries, 50 game entries and five new-game entries.
 Guest globals/entvars/edicts are 172/676/804 bytes; native layouts differ.
@@ -160,10 +162,13 @@ Fixtures cover entity-array replacement, mutable writes and callback lifetimes.
 Inactive temporary-entity bodies are excluded using the actual free/active
 lists, while their links remain synchronized. Allocations during an update
 reenter the active set before entity data are published. Studio drawing
-synchronizes its current entity, matrices and lights; event callbacks retain
-the complete boundary for reentrant gameplay.
+synchronizes its current entity, matrices and lights; sequences that may invoke
+client events retain the complete boundary for reentrant gameplay. Native
+particle allocation identities prevent retired free-list entries from being
+traversed and stale guest writes from reaching recycled native slots.
 
-The engine has a small local patch adding `-hidden` for tests. Session staging
+Local engine patches add `-hidden` for tests, expose particle allocation
+identities, and honor the single-player frame cap with VSync. Session staging
 replaces Mach-O files atomically and takes a lock shared with engine tests, so
 a running test cannot have its executable overwritten. Each client run starts
 from the mod's shipped config (`cl_lw 0`); client weapon prediction with
@@ -214,7 +219,7 @@ Fourteen actual level loads plus save/reload now pass in one process.
 ## Local app and broad smoke tests
 
 The Swift/AppKit launcher includes campaign/menu/showcase/latest-save modes,
-display and difficulty settings, original binding help, save/log shortcuts,
+display, frame limit, VSync and difficulty settings, original binding help, save/log shortcuts,
 installation locking and fatal-error recovery. Packaging copies owned data
 into a separate installation and retains settings/saves on rebuild. Mach-O
 dependencies are bundled with loader-relative paths and ad-hoc signatures;

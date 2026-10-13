@@ -38,6 +38,7 @@ static void studio_pull(void);
 static void studio_push(void);
 static void entities_end(void);
 static unsigned client_call_depth;
+#include "bridge_profile.inc"
 #define A(n) rt_r32(G_MEM,c->esp+4+4*(n))
 #define RET(v) do { c->eax=(uint32_t)(v);entities_pull();c->esp+=4;return; } while(0)
 #define RAW_RET(v) do { c->eax=(uint32_t)(v);c->esp+=4;return; } while(0)
@@ -55,7 +56,7 @@ static uint32_t copy_string(const char *text){return text?copy_bytes(text,strlen
 #include "borrowed_strings.inc"
 static void sync_cvars(void);
 static uint32_t invoke_address(uint32_t fn,const uint32_t *args,unsigned count)
-{client_call_depth++;sync_cvars();entities_pull();uint32_t result=bhl_invoke(fn,args,count,0);entities_push();if(!--client_call_depth)entities_end();return result;}
+{BHL_PROFILE("client-export",fn);client_call_depth++;sync_cvars();entities_pull();uint32_t result=bhl_invoke(fn,args,count,0);entities_push();if(!--client_call_depth)entities_end();return result;}
 static uint32_t invoke(const char *name,const uint32_t *args,unsigned count)
 {
     uint32_t fn=bhl_export("client.dll",name);if(!fn)client_missing(name);return invoke_address(fn,args,count);
@@ -126,6 +127,7 @@ static uint32_t cvar_copy(cvar_t *h)
 static void sync_cvars(void){for(CvarCopy *p=cvars;p;p=p->next)cvar_copy(p->host);}
 #define BHL_MODEL_NAMESPACE "client-model!"
 #include "model_bridge.inc"
+#include "client_model_lookup.inc"
 /* The scalar entity prefix has the same layout; only its final pointers grow
    on ARM64. A stable guest allocation preserves entity pointer identity. */
 typedef struct BhlClientEntity {
@@ -205,8 +207,8 @@ static void entity_push(EntityCopy *p)
     h->syncbase=g->syncbase;h->visframe=g->visframe;h->cvFloorColor=g->cvFloorColor;
     p->host_snapshot=*h;p->guest_snapshot=*g;p->epoch=model_epoch;p->valid=1;
 }
-static void entities_pull(void){studio_pull();effects_pull();for(EntityCopy *p=entities;p;p=p->next)entity_pull(p);}
-static void entities_push(void){temp_entities_prepare(1);for(EntityCopy *p=entities;p;p=p->next)entity_push(p);effects_push();studio_push();}
+static void entities_pull(void){BHL_PROFILE("client-pull",0);studio_pull();effects_pull();for(EntityCopy *p=entities;p;p=p->next)entity_pull(p);}
+static void entities_push(void){BHL_PROFILE("client-push",0);temp_entities_prepare(1);for(EntityCopy *p=entities;p;p=p->next)entity_push(p);effects_push();studio_push();}
 static void entities_end(void){for(EntityCopy *p=entities;p;p=p->next)if(!p->source)p->active=0;}
 static uint32_t entity_copy(cl_entity_t *h)
 {
@@ -245,13 +247,14 @@ static void playback_event(Ctx *c,int event_api)
 }
 static void client_dispatch(Ctx *c,unsigned slot)
 {
+    BHL_PROFILE("client-engine",slot);
     switch(slot){
     case BHL_CL_GetEntityByIndex:RAW_RET(entity_reference(engine.GetEntityByIndex(A(0))));
     case BHL_CL_GetLocalPlayer:RAW_RET(entity_reference(engine.GetLocalPlayer()));
     case BHL_CL_GetViewModel:RAW_RET(entity_reference(engine.GetViewModel()));
     /* These model lookups and movement queries use the engine's model table
        and prepared physents, not mutable cl_entity/tempent mirrors. */
-    case BHL_CL_CL_LoadModel:RAW_RET(model_guest(engine.CL_LoadModel(gs(A(0)),(int*)gs(A(1)))));
+    case BHL_CL_CL_LoadModel:RAW_RET(model_guest(client_load_model(gs(A(0)),(int*)gs(A(1)))));
     case BHL_CL_pfnGetModelByIndex:RAW_RET(model_guest(engine.pfnGetModelByIndex(A(0))));
     case BHL_CL_GetSpritePointer:RAW_RET(model_guest(engine.GetSpritePointer(A(0))));
     case BHL_CL_pfnGetCvarPointer:RAW_RET(cvar_copy(engine.pfnGetCvarPointer(gs(A(0)))));
@@ -311,6 +314,7 @@ static void client_dispatch(Ctx *c,unsigned slot)
 EXPORT int Initialize(cl_enginefunc_t *functions,int version)
 {
     if(!functions||version!=7)return 0;engine=*functions;
+    particle_pool_initialize();
     bhl_initialize();bhl_attach("vgui.dll");bhl_attach("client.dll");
     guest_engine=bhl_heap_alloc(135*4,1);fill_client_engine(guest_engine);
     uint32_t args[]={guest_engine,(uint32_t)version};int result=invoke("Initialize",args,2);
@@ -335,7 +339,22 @@ EXPORT int HUD_GetStudioModelInterface(int version,r_studio_interface_t **out,en
 EXPORT void HUD_TempEntUpdate(double frametime,double client_time,double gravity,TEMPENTITY **free_list,TEMPENTITY **active_list,int (*add_entity)(cl_entity_t *),void (*play_sound)(TEMPENTITY *,float))
 {temp_update(frametime,client_time,gravity,free_list,active_list,add_entity,play_sound);}
 EXPORT int HUD_AddEntity(int type,cl_entity_t *entity,const char *modelname)
-{uint32_t p=copy_string(modelname),a[]={type,entity_copy(entity),p};int r=invoke("HUD_AddEntity",a,3);bhl_heap_free(p);return r;}
+{
+    uint32_t p=copy_string(modelname),a[]={type,entity_copy(entity),p};
+    uint32_t fn=bhl_export("client.dll","HUD_AddEntity");int r;
+    /* Hash-pinned v3 RVA 0x8660..0x8917: with spectator mode (+0x14caa4)
+       zero, the callback uses only its entity/model/name and client globals.
+       Its two string helpers and RandomFloat cannot observe other mirrors.
+       Keep the original sky-camera/sky-model origin updates; only narrow the
+       ABI boundary. Spectator overlays retain the complete boundary. */
+    if(fn==0x30008660u&&!rt_r32(G_MEM,0x3014caa4u)){
+        BHL_PROFILE("client-export",fn);client_call_depth++;
+        r=bhl_invoke(fn,a,3,0);
+        EntityCopy *mirror=entity_find(entity);if(mirror)entity_push(mirror);
+        if(!--client_call_depth)entities_end();
+    }else r=invoke("HUD_AddEntity",a,3);
+    bhl_heap_free(p);return r;
+}
 EXPORT cl_entity_t *HUD_GetUserEntity(int index)
 {uint32_t a=index;return entity_host(invoke("HUD_GetUserEntity",&a,1));}
 EXPORT void HUD_StudioEvent(const struct mstudioevent_s *event,const cl_entity_t *entity)

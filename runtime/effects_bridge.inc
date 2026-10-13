@@ -9,6 +9,8 @@ _Static_assert(offsetof(BhlTempEntity,entity)==68,"tempent prefix ABI");
 _Static_assert(sizeof(BhlTempEntity)==3068,"tempent ABI");
 typedef struct TempCopy {
     TEMPENTITY *host;uint32_t guest,hit,callback;
+    int valid;
+    unsigned char host_snapshot[offsetof(TEMPENTITY,entity)],guest_snapshot[offsetof(BhlTempEntity,entity)];
     EntityCopy *entity;
     void (*native_hit)(TEMPENTITY *,pmtrace_t *);
     void (*native_callback)(TEMPENTITY *,float,float);
@@ -78,12 +80,15 @@ static void temp_callback_guest(Ctx *c)
 }
 static void temp_pull(TempCopy *p)
 {
-    TEMPENTITY *h=p->host;BhlTempEntity *g=(void*)(G_MEM+p->guest);memcpy(g,h,36);
+    TEMPENTITY *h=p->host;BhlTempEntity *g=(void*)(G_MEM+p->guest);
+    if(p->valid&&!memcmp(p->host_snapshot,h,sizeof p->host_snapshot))return;
+    memcpy(g,h,36);
     if(h->hitcallback!=temp_hit_native)p->native_hit=h->hitcallback;
     if(h->callback!=temp_callback_native)p->native_callback=h->callback;
     g->hitcallback=h->hitcallback==temp_hit_native?p->hit:h->hitcallback?temp_hit_thunk:0;
     g->callback=h->callback==temp_callback_native?p->callback:h->callback?temp_callback_thunk:0;
     g->next=h->next?temp_find(h->next)->guest:0;g->priority=h->priority;g->clientIndex=h->clientIndex;memcpy(g->tentOffset,h->tentOffset,12);
+    memcpy(p->host_snapshot,h,sizeof p->host_snapshot);memcpy(p->guest_snapshot,g,sizeof p->guest_snapshot);p->valid=1;
 }
 static uint32_t temp_guest(TEMPENTITY *h)
 {
@@ -91,6 +96,7 @@ static uint32_t temp_guest(TEMPENTITY *h)
     if(!temp_hit_thunk){temp_hit_thunk=bhl_thunk("client-temp!hit",temp_hit_guest);temp_callback_thunk=bhl_thunk("client-temp!callback",temp_callback_guest);}
     /* Pre-register every successor before exposing the list to original code. */
     unsigned count=0;for(TEMPENTITY *at=h;at;at=at->next){if(++count>65536)client_missing("cyclic tempent list");temp_find(at);}
+    temp_find(h)->valid=0;
     for(TempCopy *p=temps;p;p=p->next)temp_pull(p);
     TempCopy *first=temp_find(h);first->entity->active=1;entity_pull(first->entity);return first->guest;
 }
@@ -130,16 +136,32 @@ static void effects_push(void)
     particles_push();beams_push();
     for(LightCopy *p=lights;p;p=p->next)memcpy(p->host,G_MEM+p->guest,sizeof *p->host);
     for(TempCopy *p=temps;p;p=p->next){
-        TEMPENTITY *h=p->host;BhlTempEntity *g=(void*)(G_MEM+p->guest);memcpy(h,g,36);
+        TEMPENTITY *h=p->host;BhlTempEntity *g=(void*)(G_MEM+p->guest);
+        if(p->valid&&!memcmp(p->guest_snapshot,g,sizeof p->guest_snapshot))continue;
+        memcpy(h,g,36);
         p->hit=g->hitcallback;p->callback=g->callback;
         h->hitcallback=p->hit==temp_hit_thunk?p->native_hit:p->hit?temp_hit_native:NULL;
         h->callback=p->callback==temp_callback_thunk?p->native_callback:p->callback?temp_callback_native:NULL;
         h->next=temp_host(g->next);h->priority=g->priority;h->clientIndex=g->clientIndex;memcpy(h->tentOffset,g->tentOffset,12);
+        memcpy(p->host_snapshot,h,sizeof p->host_snapshot);memcpy(p->guest_snapshot,g,sizeof p->guest_snapshot);p->valid=1;
     }
     if(temp_guest_heads){*temp_free_head=temp_host(rt_r32(G_MEM,temp_guest_heads));*temp_active_head=temp_host(rt_r32(G_MEM,temp_guest_heads+4));}
 }
 static void temp_add_guest(Ctx *c)
-{entities_push();if(!temp_add_visible)client_missing("tempent visible callback lifetime");RET(temp_add_visible(entity_host(A(0))));}
+{
+    if(!temp_add_visible)client_missing("tempent visible callback lifetime");
+    /* Pinned CL_TempEntAddEntity/CL_AddVisibleEntity/R_AddEntity only consume
+       this entity and renderer state for non-player ET_TEMPENTITY objects.
+       They call the original HUD_AddEntity filter, whose nonspectator path
+       is also scoped. Keep free/active-list edits and unrelated effects in
+       guest ownership until a callback that actually consumes them. */
+    if(!rt_r32(G_MEM,0x3014caa4u)&&!rt_r32(G_MEM,A(0)+offsetof(BhlClientEntity,player))){
+        temp_entities_prepare(1);cl_entity_t *h=entity_host(A(0));
+        uint32_t result=temp_add_visible(h);EntityCopy *p=entity_find_active(h);if(p)entity_pull(p);
+        RAW_RET(result);
+    }
+    entities_push();RET(temp_add_visible(entity_host(A(0))));
+}
 static void temp_sound_guest(Ctx *c)
 {entities_push();if(!temp_play_sound)client_missing("tempent sound callback lifetime");temp_play_sound(temp_host(A(0)),rt_rf32(G_MEM,c->esp+8));RET(0);}
 static void temp_update(double frame,double time,double gravity,TEMPENTITY **free_list,TEMPENTITY **active_list,int (*add)(cl_entity_t *),void (*sound)(TEMPENTITY *,float))

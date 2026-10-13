@@ -1,6 +1,9 @@
 /* The original client computes animation and bone transforms. Engine drawing
  * consumes explicitly synchronized matrices and converted model identities. */
 static engine_studio_api_t studio;
+#include "studio.h"
+static const studiohdr_t *studio_header;
+static uint32_t studio_header_epoch;
 static uint32_t guest_studio,guest_studio_interface;
 typedef struct StudioBuffer {void *host;uint32_t guest,size;struct StudioBuffer *next;} StudioBuffer;
 static StudioBuffer *studio_buffers;
@@ -57,8 +60,8 @@ static StudioCache *studio_cache(uint32_t guest)
 }
 /* Studio drawing consumes the current entity, its matrices/player info and
  * dynamic lights. Unrelated visible entities and the temp/particle lists are
- * not renderer inputs. ClientEvents can reenter gameplay, so it keeps the
- * complete boundary. */
+ * not renderer inputs. ClientEvents keeps the complete boundary when its
+ * sequence may reenter gameplay. */
 static void studio_sync(int push,int complete)
 {
     if(complete){if(push)entities_push();else entities_pull();return;}
@@ -67,9 +70,29 @@ static void studio_sync(int push,int complete)
     for(LightCopy *p=lights;p;p=p->next){if(push)memcpy(p->host,G_MEM+p->guest,sizeof *p->host);else memcpy(G_MEM+p->guest,p->host,sizeof *p->host);}
     if(push)studio_push();else studio_pull();
 }
-#define STUDIO_RET(v) do{c->eax=(uint32_t)(v);studio_sync(0,slot==BHL_STUDIO_StudioClientEvents);c->esp+=4;return;}while(0)
+static int studio_events_reenter(void)
+{
+    /* R_StudioClientEvents only reenters the client for sequence events >=
+       5000. With none, it updates current attachments and muzzle lighting;
+       studio_sync already covers both. Unknown headers keep the full path. */
+    const studiohdr_t *h=studio_header;
+    cl_entity_t *current=studio.GetCurrentEntity?studio.GetCurrentEntity():NULL;
+    if(!h||studio_header_epoch!=model_epoch||!current||h->length<(int)sizeof *h||h->numseq<=0||h->seqindex<0||
+       (uint64_t)h->seqindex+(uint64_t)h->numseq*sizeof(mstudioseqdesc_t)>(unsigned)h->length)return 1;
+    EntityCopy *p=entity_find_active(current);
+    int sequence=p?((BhlClientEntity*)(G_MEM+p->guest))->curstate.sequence:current->curstate.sequence;
+    if(sequence<0)sequence=0;if(sequence>=h->numseq)sequence=h->numseq-1;
+    const mstudioseqdesc_t *s=(const void*)((const char*)h+h->seqindex+sequence*sizeof *s);
+    if(s->numevents<0||s->eventindex<0||(uint64_t)s->eventindex+(uint64_t)s->numevents*sizeof(mstudioevent_t)>(unsigned)h->length)return 1;
+    const mstudioevent_t *events=(const void*)((const char*)h+s->eventindex);
+    for(int i=0;i<s->numevents;i++)if(events[i].event>=5000)return 1;
+    return 0;
+}
+#define STUDIO_RET(v) do{c->eax=(uint32_t)(v);studio_sync(0,complete);c->esp+=4;return;}while(0)
 static void studio_dispatch(Ctx *c,unsigned slot)
 {
+    BHL_PROFILE("client-studio",slot);
+    int complete=slot==BHL_STUDIO_StudioClientEvents&&studio_events_reenter();
     /* Renderer queries cannot observe pending entity/matrix writes. Returning
        those values needs no global mirror synchronization. */
     switch(slot){
@@ -80,9 +103,24 @@ static void studio_dispatch(Ctx *c,unsigned slot)
     case BHL_STUDIO_GetTimes:studio.GetTimes((int*)gs(A(0)),(double*)gs(A(1)),(double*)gs(A(2)));RAW_RET(0);
     case BHL_STUDIO_GetViewInfo:studio.GetViewInfo((float*)gs(A(0)),(float*)gs(A(1)),(float*)gs(A(2)),(float*)gs(A(3)));RAW_RET(0);
     case BHL_STUDIO_GetAliasScale:studio.GetAliasScale((float*)gs(A(0)),(float*)gs(A(1)));RAW_RET(0);
+    /* These pinned renderer entries only select objects or change renderer
+       flags; they do not consume entity, light or matrix mirror contents. */
+    case BHL_STUDIO_SetForceFaceFlags:studio.SetForceFaceFlags(A(0));RAW_RET(0);
+    case BHL_STUDIO_StudioSetHeader:
+        studio_header=(const void*)model_host_data(A(0));studio_header_epoch=model_epoch;
+        studio.StudioSetHeader((void*)studio_header);RAW_RET(0);
+    case BHL_STUDIO_SetRenderModel:studio.SetRenderModel(model_host(A(0)));RAW_RET(0);
+    case BHL_STUDIO_RestoreRenderer:studio.RestoreRenderer();RAW_RET(0);
+    case BHL_STUDIO_SetChromeOrigin:studio.SetChromeOrigin();RAW_RET(0);
+    case BHL_STUDIO_StudioSetCullState:studio.StudioSetCullState(A(0));RAW_RET(0);
+    case BHL_STUDIO_GL_SetRenderMode:studio.GL_SetRenderMode(A(0));RAW_RET(0);
+    case BHL_STUDIO_GetCvar:RAW_RET(cvar_copy(studio.GetCvar(gs(A(0)))));
+    case BHL_STUDIO_GetModelByIndex:RAW_RET(model_guest(studio.GetModelByIndex(A(0))));
+    case BHL_STUDIO_GetChromeSprite:RAW_RET(model_guest(studio.GetChromeSprite()));
+    case BHL_STUDIO_Mem_Calloc:{uint64_t size=(uint64_t)A(0)*A(1);if(size>UINT32_MAX)RAW_RET(0);RAW_RET(bhl_heap_alloc(size,1));}
     default:break;
     }
-    studio_sync(1,slot==BHL_STUDIO_StudioClientEvents);if(getenv("BHL_BRIDGE_TRACE"))fprintf(stderr,"studio %s\n",studio_names[slot]);
+    studio_sync(1,complete);if(getenv("BHL_BRIDGE_TRACE"))fprintf(stderr,"studio %s\n",studio_names[slot]);
     switch(slot){
     case BHL_STUDIO_Mem_Calloc:{uint64_t size=(uint64_t)A(0)*A(1);if(size>UINT32_MAX)STUDIO_RET(0);STUDIO_RET(bhl_heap_alloc(size,1));}
     case BHL_STUDIO_Cache_Check:{StudioCache *p=studio_cache(A(0));void *h=studio.Cache_Check(&p->host);if(!h){rt_w32(G_MEM,A(0),0);STUDIO_RET(0);}
@@ -137,7 +175,9 @@ static void studio_dispatch(Ctx *c,unsigned slot)
     case BHL_STUDIO_StudioClientEvents:studio.StudioClientEvents();STUDIO_RET(0);
     case BHL_STUDIO_GetForceFaceFlags:STUDIO_RET(studio.GetForceFaceFlags());
     case BHL_STUDIO_SetForceFaceFlags:studio.SetForceFaceFlags(A(0));STUDIO_RET(0);
-    case BHL_STUDIO_StudioSetHeader:studio.StudioSetHeader((void*)model_host_data(A(0)));STUDIO_RET(0);
+    case BHL_STUDIO_StudioSetHeader:
+        studio_header=(const void*)model_host_data(A(0));studio_header_epoch=model_epoch;
+        studio.StudioSetHeader((void*)studio_header);STUDIO_RET(0);
     case BHL_STUDIO_SetRenderModel:studio.SetRenderModel(model_host(A(0)));STUDIO_RET(0);
     case BHL_STUDIO_SetupRenderer:studio.SetupRenderer(A(0));STUDIO_RET(0);
     case BHL_STUDIO_RestoreRenderer:studio.RestoreRenderer();STUDIO_RET(0);

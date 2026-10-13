@@ -35,7 +35,7 @@ struct Installation {
                 return ad < bd
             }?.deletingPathExtension().lastPathComponent
     }
-    func process(mode: Int, resolution: Int, fullscreen: Bool, difficulty: Int, testScript: String? = nil) throws -> Process {
+    func process(mode: Int, resolution: Int, fullscreen: Bool, difficulty: Int, frameRate: Int = 0, vsync: Bool = true, testScript: String? = nil) throws -> Process {
         try validate()
         let p = Process(); p.executableURL = runtime.appendingPathComponent("xash3d"); p.currentDirectoryURL = data
         var env = ProcessInfo.processInfo.environment
@@ -58,6 +58,8 @@ struct Installation {
             env["DYLD_PRINT_LIBRARIES"] = "1"
             args += ["-hidden", "-nomouse", "-nowriteconfig", "-dev", "3", "+exec", script]
         } else {
+            let limits = [120, 60, 1000]
+            args += ["+fps_max", String(limits[min(max(frameRate, 0), limits.count - 1)]), "+gl_vsync", vsync ? "1" : "0"]
             switch mode {
             case 1: args += ["+map", "start"]
             case 2: args += ["+map", "_zoo"]
@@ -76,8 +78,8 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var installation: Installation!
     var window: NSWindow!
     var content: Backdrop!
-    var mode: NSPopUpButton!, display: NSPopUpButton!, difficulty: NSPopUpButton!
-    var fullscreen: NSButton!, play: MetalButton!, status: NSTextField!
+    var mode: NSPopUpButton!, display: NSPopUpButton!, difficulty: NSPopUpButton!, frameRate: NSPopUpButton!
+    var fullscreen: NSButton!, vsync: NSButton!, play: MetalButton!, status: NSTextField!
     var child: Process?
     var output: FileHandle?
     var sessionLock: Int32 = -1
@@ -91,7 +93,7 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
-            defaults.register(defaults: ["difficulty": 1])
+            defaults.register(defaults: ["difficulty": 1, "vsync": true])
             if let i = CommandLine.arguments.firstIndex(of: "--write-iconset"), i + 1 < CommandLine.arguments.count {
                 try writeIconset(URL(fileURLWithPath: CommandLine.arguments[i + 1])); exit(0)
             }
@@ -130,23 +132,27 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
         p.font = copper(16); p.setAccessibilityLabel(title); content.addSubview(p); return p
     }
     func buildWindow() {
-        content = Backdrop(frame: NSRect(x: 0, y: 0, width: 740, height: 654))
+        content = Backdrop(frame: NSRect(x: 0, y: 0, width: 740, height: 703))
         window = NSWindow(contentRect: content.bounds, styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         window.title = "Brutal Half-Life"; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
         window.appearance = NSAppearance(named: .darkAqua); window.isReleasedWhenClosed = false; window.delegate = self; window.contentView = content
         mode = picker("START", ["Game menu", "New campaign", "Weapon showcase", "Continue latest save"], y: 245, key: "mode")
         display = picker("RESOLUTION", ["1280 × 720", "1600 × 900", "1920 × 1080", "2560 × 1440"], y: 294, key: "resolution")
-        difficulty = picker("DIFFICULTY", ["Easy", "Normal", "Hard"], y: 343, key: "difficulty")
+        frameRate = picker("FRAME RATE", ["120 FPS limit", "60 FPS limit", "Uncapped"], y: 343, key: "frameRate")
+        difficulty = picker("DIFFICULTY", ["Easy", "Normal", "Hard"], y: 392, key: "difficulty")
         fullscreen = NSButton(checkboxWithTitle: "Fullscreen", target: nil, action: nil)
-        fullscreen.frame = NSRect(x: 265, y: 389, width: 300, height: 30); fullscreen.state = defaults.bool(forKey: "fullscreen") ? .on : .off
+        fullscreen.frame = NSRect(x: 265, y: 438, width: 185, height: 30); fullscreen.state = defaults.bool(forKey: "fullscreen") ? .on : .off
         content.addSubview(fullscreen)
-        _ = button("CONTROLS", NSRect(x: 40, y: 445, width: 208, height: 46), #selector(controls))
-        _ = button("SAVED GAMES", NSRect(x: 266, y: 445, width: 208, height: 46), #selector(openSaves))
-        _ = button("FILES & LOG", NSRect(x: 492, y: 445, width: 208, height: 46), #selector(openFiles))
-        status = label("Local development build · Campaign validation in progress", NSRect(x: 40, y: 516, width: 660, height: 42), size: 12, color: muted)
+        vsync = NSButton(checkboxWithTitle: "VSync", target: nil, action: nil)
+        vsync.frame = NSRect(x: 465, y: 438, width: 200, height: 30); vsync.state = defaults.bool(forKey: "vsync") ? .on : .off
+        content.addSubview(vsync)
+        _ = button("CONTROLS", NSRect(x: 40, y: 494, width: 208, height: 46), #selector(controls))
+        _ = button("SAVED GAMES", NSRect(x: 266, y: 494, width: 208, height: 46), #selector(openSaves))
+        _ = button("FILES & LOG", NSRect(x: 492, y: 494, width: 208, height: 46), #selector(openFiles))
+        status = label("Local development build · Campaign validation in progress", NSRect(x: 40, y: 565, width: 660, height: 42), size: 12, color: muted)
         status.alignment = .center; content.addSubview(status)
-        let quit = button("QUIT", NSRect(x: 141, y: 583, width: 220, height: 52), #selector(quitApp)); quit.keyEquivalent = "\u{1b}"
-        play = button("PLAY", NSRect(x: 379, y: 583, width: 220, height: 52), #selector(playGame)); play.primary = true; play.keyEquivalent = "\r"
+        let quit = button("QUIT", NSRect(x: 141, y: 632, width: 220, height: 52), #selector(quitApp)); quit.keyEquivalent = "\u{1b}"
+        play = button("PLAY", NSRect(x: 379, y: 632, width: 220, height: 52), #selector(playGame)); play.primary = true; play.keyEquivalent = "\r"
     }
     @objc func controls() {
         let alert = NSAlert(); alert.messageText = "Brutal Half-Life controls"
@@ -163,6 +169,7 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
         do {
             defaults.set(mode.indexOfSelectedItem, forKey: "mode"); defaults.set(display.indexOfSelectedItem, forKey: "resolution")
             defaults.set(difficulty.indexOfSelectedItem, forKey: "difficulty"); defaults.set(fullscreen.state == .on, forKey: "fullscreen")
+            defaults.set(frameRate.indexOfSelectedItem, forKey: "frameRate"); defaults.set(vsync.state == .on, forKey: "vsync")
             try start()
         } catch { NSAlert(error: error).runModal() }
     }
@@ -176,7 +183,8 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         do {
             let p = try installation.process(mode: mode?.indexOfSelectedItem ?? 0, resolution: display?.indexOfSelectedItem ?? 0,
-                                             fullscreen: fullscreen?.state == .on, difficulty: difficulty?.indexOfSelectedItem ?? 1, testScript: testScript)
+                                             fullscreen: fullscreen?.state == .on, difficulty: difficulty?.indexOfSelectedItem ?? 1,
+                                             frameRate: frameRate?.indexOfSelectedItem ?? 0, vsync: vsync?.state != .off, testScript: testScript)
             FileManager.default.createFile(atPath: installation.log.path, contents: nil)
             let handle = try FileHandle(forWritingTo: installation.log); try handle.truncate(atOffset: 0)
             p.standardOutput = handle; p.standardError = handle; output = handle

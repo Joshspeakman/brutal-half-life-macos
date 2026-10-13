@@ -36,7 +36,7 @@ def main():
     wait = 'wait\n'
     scripts = {
         'menu': 'scr_conspeed 100000\nescape\n'+wait*20+'snapshot scrshots/native-package-menu.png\n'+wait*3+'echo BHL_PACKAGE_MENU\nquit\n',
-        'campaign': 'map start\n'+wait*35+'snapshot scrshots/native-package-start.png\n'+wait*3+'echo BHL_PACKAGE_CAMPAIGN\nquit\n',
+        'campaign': 'map start\nscr_conspeed 100000\n'+wait*240+'snapshot scrshots/native-package-start.png\n'+wait*3+'echo BHL_PACKAGE_CAMPAIGN\nquit\n',
         'save': 'map _zoo\n'+wait*30+'sv_cheats 1\ngod\nimpulse 101\n'+wait*10+'save native-package\n'+wait*5+'echo BHL_PACKAGE_SAVE\nquit\n',
         'reload': 'load native-package\n'+wait*35+'echo BHL_PACKAGE_RELOAD\nquit\n',
         'transition': 'map c0a0\n'+wait*30+'changelevel c0a0a c0a0toa\n'+wait*35+'save native-transition\n'+wait*5+'load native-transition\n'+wait*30+'echo BHL_PACKAGE_TRANSITION\nquit\n',
