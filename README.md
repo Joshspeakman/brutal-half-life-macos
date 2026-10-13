@@ -3,9 +3,10 @@
 Local development of an Apple Silicon port using the original v3 modules.
 **The complete conversion is still under validation.** A local Mac app now
 launches the original client and server, renders the campaign hub and showcase,
-plays decoded audio, and supports native saves. Full campaign behavior,
-interactive controls, audible/visual comparison and performance need further
-validation before this can be considered finished.
+plays decoded audio through CoreAudio, and supports native saves. All 134
+shipped maps pass initial activation/simulation checks. Full campaign behavior,
+physical mouse/fullscreen use, audible/visual comparison and performance need
+further validation before this can be considered finished.
 
 Original x86 instructions are translated to C and compiled to ARM64. The
 runtime uses a 32-bit guest address space and explicit adapters to native
@@ -67,12 +68,14 @@ v3's bindings; detailed input/audio/video settings remain in the game menu.
 | Server integration | GameInit, movement initialization and three delta encoders run through native callbacks |
 | Headless map | `c0a0` activates and completes at least ten server frames in a bounded session |
 | Client integration | Original movement, studio animation, entities and temporary effects cross the native boundary; OpenGL produces a coherent showcase scene and view model |
-| Audio | Original FMOD decodes WAV and game MP3 data to nonzero PCM; pause/resume, seek, volume, pan and shutdown checks pass on dummy audio |
+| Audio | Original FMOD decodes WAV and game MP3 data to nonzero PCM; pause/resume, seek, volume, pan and shutdown checks pass on dummy audio and the native CoreAudio device |
 | VGUI | Original App, Label and Surface code produces text textures through CoreText, paints through the engine API and passes surface restart checks |
 | Saving | Original serializer handles fields, entities, time and landmarks; packaged tests cover fresh-process reload and the first tram landmark transition |
 | Combat smoke tests | All 36 exported weapon classes have been requested across scripted primary/secondary/reload and save/load batches; equipping variants and hit behavior need gameplay comparison |
-| Mac packaging | Five packaged-launcher checks pass: menu, campaign hub, save, fresh-process reload and landmark transition; bundled libraries load without Homebrew dependencies |
-| Complete conversion | Pending: complete map/campaign coverage, interactive and audible/visual comparison, remaining runtime edge cases and performance |
+| Map coverage | All 134 shipped maps pass activation, 35 initial frames, capture and normal shutdown; fourteen repeated loads plus save/reload pass in one process |
+| Input | SDL queue events exercise original walking, jumping, crouching, menu return, F5 quicksave and F6 quickload; physical input remains unverified |
+| Mac packaging | Eight packaged-launcher checks pass: menu, campaign hub, save, fresh-process reload, landmark transition, mounted-weapon combat, movement and repeated level loads; bundled libraries load without Homebrew dependencies |
+| Complete conversion | Pending: full campaign/script playthrough, physical input and audible/visual comparison, remaining runtime edge cases and performance |
 
 Startup comparisons share the native OS-service model. They validate the
 translation, **not Windows API equivalence**. Null rendering and dummy audio
@@ -99,7 +102,16 @@ tied to the exact server binary. Windows save compatibility is not established.
 `tests/test_map_matrix.py` exercises all shipped BHL maps for activation,
 initial simulation, capture and normal shutdown. `--resume` reuses passes only
 for the same staged binaries. `tests/test_weapon_matrix.py` checks scripted
-weapon batches. Neither constitutes a full playthrough.
+weapon batches; `--soak --seconds-per-weapon 100` allows complete draw, fire
+and reload intervals. Neither constitutes a full playthrough.
+
+`tests/test_packaged_app.py` validates a bundle with data under ignored `work/`.
+`tests/test_input.py --session work/session` posts events only to that test
+process's SDL queue, including the original quicksave/load bindings.
+`tests/test_fmod.py --audio-driver coreaudio` verifies device-frame advancement
+and nonzero decoded PCM at reduced test volume. It does not measure what a
+listener hears. Tests accept separate sessions under `work/` to keep configs,
+saves and report files isolated.
 
 See [port status and acceptance criteria](docs/PORT.md) and
 [dependency provenance](NOTICE.txt). Original assets and generated game code

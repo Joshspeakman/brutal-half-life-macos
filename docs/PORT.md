@@ -98,9 +98,11 @@ guest Lock writes. Four thread tests cover
 separate TEB/TLS state, suspended startup, event reset modes and cooperative
 termination. The original FMOD passes initialization at 44.1 kHz, worker
 execution, device-frame advancement and shutdown. It also decodes a synthetic
-WAV and an owned game MP3 to nonzero PCM. These use SDL's dummy driver;
-pause/resume with stable paused time, seeking, volume/pan readback and shutdown
-also pass through original FMOD. Actual audible output remains unverified.
+WAV and an owned game MP3 to nonzero PCM. These pass on SDL's dummy driver
+and the native CoreAudio device at 44.1 kHz stereo. Pause/resume with stable
+paused time, seeking, volume/pan readback and shutdown also pass through
+original FMOD. The hardware test advances real device frames at reduced
+volume; audible quality has not been judged by a listener.
 
 The VGUI fixture executes the original App/Label/SurfaceBase constructors,
 font measurement and glyph extraction, then records native drawing calls.
@@ -119,8 +121,14 @@ being declared as integers. String conversion caches validate native pool
 reuse, and global trace writes return to the engine. Native edict-pool
 replacement and growth retain stable guest addresses. Snapshots skip unchanged
 records; audited scalar queries avoid full synchronization. Sphere searches
-publish only the bounds the pinned engine reads. Remaining broad boundaries
-still require profiling.
+publish only the bounds the pinned engine reads. Profiling identified repeated
+whole-world synchronization in the packet loop. The pinned v3 AddToFullPack
+only writes its output state and group-mask globals; it now reuses the snapshot
+created by SetupVisibility. Other server callbacks and non-query engine calls
+invalidate it. A fixture compares full and reused-snapshot results for visible,
+culled, hidden, grouped and player entities. The first sustained weapon batch
+took 85 seconds versus 140 before this change on the development machine;
+concurrent test workloads prevent treating that as a gameplay FPS benchmark.
 
 Client Initialize copies 135 DWORDs. Native trampolines represent guest
 callbacks. Nested API tables remain guest tables; missing methods fail by
@@ -159,13 +167,30 @@ the pinned v3 server. `CFuncTank::Fire` stores the sprite at object offset
 next mounted-weapon Think accessed the recycled allocation as a sprite and
 crashed. The native free callback now clears matching references on the four
 identified tank classes before releasing the sprite. A regression fixture
-checks live/unrelated references and immediate allocation reuse. Extended
-combat now passes the previous crash point and exits normally; its separate
-combat save test still needs a confirmed invulnerability command after signon.
+checks live/unrelated references and immediate allocation reuse. The packaged
+combat test enables invulnerability after signon, runs 200 combat frames,
+observes the repair, writes a fresh save and reloads successfully.
 
 This is an explicit compatibility repair, not a claim that the original code
 already handled this lifetime. Executable image bytes and translated
 instructions remain unchanged.
+
+## Sustained-session memory
+
+Long firing sessions exhausted the original 128 MiB translation heap, and a
+nine-map cycle exhausted it while copying a model. The former allocator could
+reserve a freed 950 KiB block for a 16-byte request; old level models also
+accumulated indefinitely. The heap now splits recycled blocks, coalesces
+adjacent free spans, and uses free-size bins plus a live-address index.
+Regressions retain 4,096 small allocations between large transient buffers,
+verify their contents and verify reclamation in alternating free order.
+
+Model reset releases borrowed BSP/studio copies while preserving descriptor
+identity; opaque token slots are reused. Surviving native studio cache data
+are remapped before returning their guest handle. Borrowed string queries
+reuse equal results instead of creating another permanent copy each frame.
+A boundary fixture checks 160 model resets and 10,000 repeated string queries.
+Fourteen actual level loads plus save/reload now pass in one process.
 
 ## Local app and broad smoke tests
 
@@ -176,47 +201,49 @@ into a separate installation and retains settings/saves on rebuild. Mach-O
 dependencies are bundled with loader-relative paths and ad-hoc signatures;
 the prepared original images remain data for the ARM64 runtime.
 
-Five packaged-launcher stages pass: menu startup, campaign hub with capture,
-showcase save, fresh-process reload and the first tram landmark transition.
+Eight packaged-launcher stages pass: menu startup, campaign hub with capture,
+showcase save, fresh-process reload, the first tram landmark transition,
+mounted-weapon combat/save/reload, movement and fourteen consecutive level
+loads followed by another save/reload.
 Loaded-library checks verify bundled SDL2/SDL3 and engine dependencies without
 Homebrew runtime paths. These checks must be repeated after runtime changes.
 
 `tests/test_map_matrix.py` records activation, 35 initial frames, capture and
 normal shutdown for all 134 shipped BHL maps. Reports are keyed by staged
 binary hashes; a rebuilt runtime cannot reuse earlier passes. The initial
-sweep passed 57 maps before finding the tank-sprite fault. The fixed runtime's
-full sweep is in progress. `tests/test_weapon_matrix.py` retains separate
+sweep passed 57 maps before finding the tank-sprite fault. All 134 maps pass
+with the tank, memory and packet fixes. `tests/test_weapon_matrix.py` retains separate
 weapon-batch logs. These are smoke checks, not complete campaign/script,
 weapon-hit, animation or enemy-behavior validation.
 
-## Work required for the complete conversion
+The SDL input driver is a test-only dylib loaded into a hidden engine. It
+posts to that process's SDL queue, never macOS's global event stream. Original
+bindings produce measured walking/jumping/crouching, menu return, a fresh F5
+quicksave and F6 reload. This does not establish physical mouse capture or
+fullscreen behavior.
 
-1. **Audio:** audit overlapping buffer locks, reference lifetimes and remaining
-   DirectSound controls. Verify map music routing and actual decoded music,
-   effects, loops, pause/resume and shutdown audibly.
-2. **GUI:** compare font metrics and appearance, exercise interactive menus,
-   test nested clipping/cursor/input behavior and audit guest UI allocations
-   across level/restart cycles. Guest C++ objects and vtables remain in guest
-   memory; only OS-facing App and engine-owned Surface methods cross to native.
-3. **Rendering/client:** finish triangle/effects/event/studio APIs, models,
-   entities, view calculation, HUD, particles, weapon animation, fades and
-   input prediction. Compare real rendering and combat against original behavior.
-4. **Server/player:** finish movement/collision, connections, data packing,
-   visibility and remaining callbacks. Audit guest writes to globals and
-   continue checking model/private-data lifetimes across level transitions.
-5. **Saves:** extend the working serializer and showcase reload checks to
-   quicksave/load, checkpoints, adjacent levels, fresh process loads and
-   repeated save cycles. Compare restored behavior with the original.
-6. **Runtime:** finish memory protection/reservation, module lifetime,
-   exceptions, data imports, threading, locale edges and file modes reached
-   by gameplay. Audit extended CPUID, x87 precision, unsupported instructions
-   and dynamic jump targets.
-7. **Performance:** profile real frames, then optimize synchronization and
-   audit string/file-copy lifetimes. No performance claim is established.
-8. **QA/packaging:** exercise every v3 weapon/enemy, campaign scripts and
-   transitions. Finish the full map sweep and repeat packaged-launcher tests
-   against the final runtime. Nightly publication follows local acceptance
-   separately.
+## Remaining acceptance work
+
+The local app is a development build. These are material limits on the current
+evidence, not skipped features that can be claimed as verified:
+
+- Complete the campaign and custom-map scripts, including bosses, endings and
+  secrets. Initial execution of every map is not a complete playthrough.
+- Compare weapon variants, damage/gore, enemy behavior, animations, lighting,
+  fonts and audio with the original release. Weapon exports being requested
+  does not prove every variant was equipped or every hit behaved identically.
+- Exercise physical mouse capture, fullscreen switching, interactive settings,
+  controller behavior and audible output. Synthetic SDL events and device
+  frame counts cover narrower boundaries.
+- Verify Windows save imports and further checkpoint/landmark combinations.
+  Native fresh-process saves work; Windows compatibility is not established.
+- Continue testing runtime paths reached by gameplay. Exceptions, guest memory
+  protection, less common OS/file modes and x87 precision have the explicit
+  limitations described above. Unimplemented behavior fails by name.
+- Profile representative real gameplay. Synchronization has improved, but no
+  minimum frame-rate guarantee has been established.
+
+Nightly publication remains a separate step after local acceptance.
 
 Two map warnings name `ammo_chaingunclip` and `item_glow`; neither is exported
 by the original server. Check original behavior before adding aliases.

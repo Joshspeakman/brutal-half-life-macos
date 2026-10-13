@@ -29,12 +29,14 @@ def main():
     (session/'bhl/native-input.cfg').write_text(script)
     shutil.copy2(ROOT/'work/fixtures/bhl-config.cfg',session/'bhl/config.cfg')
     log=ROOT/'work/reports/input.log'
+    saved=session/'bhl/save/quick.sav';saved.unlink(missing_ok=True)
     env=dict(os.environ,BHL_IMAGE_DIR=str(ROOT/'work/images'),SDL_VIDEODRIVER='cocoa',SDL_AUDIODRIVER='dummy',DYLD_LIBRARY_PATH=str(session),DYLD_INSERT_LIBRARIES=str(driver),BHL_TEST_INPUT_LOG=str(log))
     with log.open('w') as output:
         p=subprocess.run(['./xash3d','-game','bhl','-ref','gl','-hidden','-windowed','-width','800','-height','600','-nomouse','-noip','-noip6','-nomaster','-nowriteconfig','-dev','3','+map','_zoo','+exec','native-input.cfg'],cwd=session,env=env,stdout=output,stderr=subprocess.STDOUT,timeout=120)
     text=re.sub(r'\x1b\[[0-9;]*m','',log.read_text(errors='replace'))
     positions=[tuple(map(float,m)) for m in re.findall(r'org \( ([\d.eE+-]+) ([\d.eE+-]+) ([\d.eE+-]+) \)',text)]
-    checks=dict(normal_exit=p.returncode==0,finished='BHL_INPUT_DONE' in text,all_events_injected=len(re.findall(r'BHL SDL injected scan=\d+ down=[01]: 1',text))==16,five_positions=len(positions)==5,no_failure=not re.search(r'Crash:|BHL.*(?:unimplemented|exhausted)|Host_Error:',text))
+    checks=dict(normal_exit=p.returncode==0,finished='BHL_INPUT_DONE' in text,all_events_injected=len(re.findall(r'BHL SDL injected scan=\d+ down=[01]: 1',text))==24,five_positions=len(positions)==5,no_failure=not re.search(r'Crash:|BHL.*(?:unimplemented|exhausted)|Host_Error:',text),
+                quicksave_written=saved.exists() and saved.stat().st_size>0,quickload_reconnected=text.count('client connected at')>=2)
     if len(positions)==5:
         checks.update(walking=sum((positions[1][i]-positions[0][i])**2 for i in (0,1))>64,jumping=positions[2][2]>positions[1][2]+8,crouching=positions[4][2]>positions[3][2]+8)
     report=dict(checks=checks,view_positions=positions,passed=all(checks.values()),physical_input_tested=False)

@@ -29,6 +29,10 @@ static void *drive(void *unused)
     key(SDL_SCANCODE_SPACE,SDLK_SPACE,1);usleep(200000);key(SDL_SCANCODE_SPACE,SDLK_SPACE,0);position();usleep(2000000);
     key(SDL_SCANCODE_LCTRL,SDLK_LCTRL,1);usleep(500000);position();usleep(200000);
     key(SDL_SCANCODE_LCTRL,SDLK_LCTRL,0);usleep(500000);position();usleep(200000);
+    key(SDL_SCANCODE_ESCAPE,SDLK_ESCAPE,1);key(SDL_SCANCODE_ESCAPE,SDLK_ESCAPE,0);usleep(500000);
+    key(SDL_SCANCODE_ESCAPE,SDLK_ESCAPE,1);key(SDL_SCANCODE_ESCAPE,SDLK_ESCAPE,0);usleep(500000);
+    key(SDL_SCANCODE_F5,SDLK_F5,1);key(SDL_SCANCODE_F5,SDLK_F5,0);usleep(1500000);
+    key(SDL_SCANCODE_F6,SDLK_F6,1);key(SDL_SCANCODE_F6,SDLK_F6,0);usleep(3000000);
     key(SDL_SCANCODE_F12,SDLK_F12,1);key(SDL_SCANCODE_F12,SDLK_F12,0);return NULL;
 }
 __attribute__((constructor)) static void start(void){pthread_t thread;if(!pthread_create(&thread,NULL,drive,NULL))pthread_detach(thread);}

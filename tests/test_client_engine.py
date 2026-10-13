@@ -52,7 +52,7 @@ def main():
         # Startup exec runs before signon; forwarding "god" before the
         # client connects is rejected as an unknown command by the engine.
         script=('wait\n'*25+'sv_cheats 1\ngod\n' if args.god else '')+'wait\n'*(args.quit_after_frames or args.capture_frames)
-        if args.capture:script+='snapshot scrshots/native-acceptance.png\n'+'wait\n'*3
+        if args.capture:script+='scr_conspeed 100000\n'+'wait\n'*3+'snapshot scrshots/native-acceptance.png\n'+'wait\n'*3
         if args.music:
             if not re.fullmatch(r'[A-Za-z0-9_-]+',args.map):ap.error('Map name cannot form a music path')
             script+=f'playaudio {args.map}.mp3\n'+'wait\n'*5
