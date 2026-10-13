@@ -41,10 +41,14 @@ static void app_arena(Ctx *c)
 }
 static void get_rect(uint32_t panel,unsigned slot,int out[4])
 { uint32_t p=bhl_heap_alloc(16,1);VC(panel,slot,p,p+4,p+8,p+12);memcpy(out,G_MEM+p,16);bhl_heap_free(p); }
-static void apply_paint(void)
+static void update_paint_bounds(void)
 {
     if(paint_depth){Paint *p=&paint_stack[paint_depth-1];memcpy(translation,p->translation,8);memcpy(clip,p->clip,16);}
     else{translation[0]=translation[1]=0;clip[0]=clip[1]=0;clip[2]=screen[0];clip[3]=screen[1];}
+}
+static void apply_paint(void)
+{
+    update_paint_bounds();
     api->SetPaintOffset(translation[0],translation[1]);
 }
 static void quad(float x0,float y0,float x1,float y1,float s0,float t0,float s1,float t1)
@@ -131,7 +135,12 @@ static void startup(int width,int height)
     VC(app,0);VC(app,37,0);
     surface=bhl_heap_alloc(64,1);method(surface,"??0SurfaceBase@vgui@@QAE@PAVPanel@1@@Z",&root,1);surface_table=copy_vtable(surface,35);
     for(unsigned i=0;i<35;i++)if(surface_methods[i]){char name[64];snprintf(name,sizeof name,"vgui-surface!%u",i);override(surface_table,i,name,surface_methods[i]);}
-    VC(root,91,surface);api->DrawInit();apply_paint();fprintf(stderr,"BHL v3 VGUI App and native surface initialized\n");
+    VC(root,91,surface);api->DrawInit();
+    /* Startup precedes client Initialize/HUD_VidInit. Xash's SetPaintOffset
+       scales by the still-zero HUD screen size here, poisoning the shared
+       2D transform with NaNs. Only publish offsets during panel painting,
+       after the client has initialized its screen information. */
+    update_paint_bounds();fprintf(stderr,"BHL v3 VGUI App and native surface initialized\n");
 }
 static void shutdown(void)
 {

@@ -30,9 +30,12 @@ def main():
         ap.error('Acceptance tests require isolated data inside ignored work/')
     executable = app/'Contents/MacOS/BrutalHalfLife'
     out = ROOT/'work/reports/packaged'; out.mkdir(exist_ok=True)
+    image_probe = ROOT/'work/native/image-coverage'
+    if 'menu' in args.stages:
+        subprocess.run(['swiftc', str(ROOT/'tests/image_coverage.swift'), '-o', str(image_probe)], check=True)
     wait = 'wait\n'
     scripts = {
-        'menu': wait*20+'echo BHL_PACKAGE_MENU\nquit\n',
+        'menu': 'scr_conspeed 100000\nescape\n'+wait*20+'snapshot scrshots/native-package-menu.png\n'+wait*3+'echo BHL_PACKAGE_MENU\nquit\n',
         'campaign': 'map start\n'+wait*35+'snapshot scrshots/native-package-start.png\n'+wait*3+'echo BHL_PACKAGE_CAMPAIGN\nquit\n',
         'save': 'map _zoo\n'+wait*30+'sv_cheats 1\ngod\nimpulse 101\n'+wait*10+'save native-package\n'+wait*5+'echo BHL_PACKAGE_SAVE\nquit\n',
         'reload': 'load native-package\n'+wait*35+'echo BHL_PACKAGE_RELOAD\nquit\n',
@@ -53,6 +56,8 @@ def main():
         if stage == 'cycles': (data/'bhl/save/native-cycles.sav').unlink(missing_ok=True)
         capture = data/'bhl/scrshots/native-package-start.png'
         if stage == 'campaign': capture.unlink(missing_ok=True)
+        menu_capture = data/'bhl/scrshots/native-package-menu.png'
+        if stage == 'menu': menu_capture.unlink(missing_ok=True)
         log = out/(stage+'.launcher.log'); began = time.monotonic(); timeout = False
         with log.open('w') as stream:
             p = subprocess.Popen([str(executable), '--engine-test', name], stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
@@ -75,6 +80,11 @@ def main():
         missing_art = re.findall(r'couldn.t load "(gfx/shell/[^\"]+)"', text)
         checks['menu_assets_available'] = not (set(missing_art)-{'gfx/shell/splash'})
         if stage == 'campaign': checks['capture_written'] = capture.exists()
+        if stage == 'menu':
+            checks['capture_written'] = menu_capture.exists()
+            probe = subprocess.run([str(image_probe), str(menu_capture)], text=True, capture_output=True)
+            checks['menu_not_blank'] = probe.returncode == 0
+            (out/'menu-coverage.json').write_text(probe.stdout or json.dumps({'passed': False, 'error': probe.stderr}))
         if stage != 'menu':
             checks.update(connected='client connected at' in text, frames='BHL v3 completed 10 server frames' in text)
         if stage == 'save':

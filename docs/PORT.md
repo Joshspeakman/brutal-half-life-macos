@@ -107,6 +107,14 @@ volume; audible quality has not been judged by a listener.
 The VGUI fixture executes the original App/Label/SurfaceBase constructors,
 font measurement and glyph extraction, then records native drawing calls.
 It checks nonempty glyph alpha, drawing bounds and two surface lifecycles.
+It also rejects drawing-offset calls before client screen initialization.
+The adapter previously published its initial zero offset during VGUI startup,
+before Xash had initialized the HUD screen size. Scaling that offset divided
+by zero and left NaNs in the shared 2D transform, making the initial menu
+black. Offsets now cross to the renderer only during panel painting. A
+packaged menu capture regression produces zero lit pixels with the old
+adapter and a visible menu with the corrected adapter; campaign startup and
+fresh-process save/load still pass.
 The font adapter maps the GDI memory-DC subset to CoreText and 32-bit DIBs.
 This does not establish Windows-identical font metrics or visual fidelity.
 Interactive menus and visual font fidelity remain unverified.

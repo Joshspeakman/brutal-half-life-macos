@@ -106,6 +106,9 @@ weapon batches; `--soak --seconds-per-weapon 100` allows complete draw, fire
 and reload intervals. Neither constitutes a full playthrough.
 
 `tests/test_packaged_app.py` validates a bundle with data under ignored `work/`.
+Its menu stage captures the initial screen before any map loads and rejects
+a blank image. This catches startup drawing failures that successful engine
+initialization and map smoke tests alone do not detect.
 `tests/test_input.py --session work/session` posts events only to that test
 process's SDL queue, including the original quicksave/load bindings.
 `tests/test_fmod.py --audio-driver coreaudio` verifies device-frame advancement
