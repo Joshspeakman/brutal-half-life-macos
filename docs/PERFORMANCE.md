@@ -30,6 +30,10 @@ updated runtime averaged 57.76 FPS, confirming the cost of repeated scans.
 A separate visible fullscreen run used normal elapsed simulation time,
 CoreAudio output, the 120 FPS limit and VSync, at 3456 × 2168 physical pixels.
 Across 3,600 frames it averaged **118.75 FPS**, with a **69.02 FPS 1% low**.
+A repeat from the installed bundle averaged **118.48 FPS**, with a
+**59.84 FPS 1% low**. The repeat's raw report is
+`work/reports/combat120-installed-fullscreen.json`; the slower tail varies
+between runs even though average throughput stays close to 120 FPS.
 Both engine and original FMOD output verified CoreAudio, and `gamepolicyd`
 confirmed Game Mode activation for the game process. This is near the target
 on average, but the slower frames prevent a locked 120 FPS result.
