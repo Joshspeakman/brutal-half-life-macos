@@ -92,6 +92,21 @@ static int studio_events_reenter(void)
     for(int i=0;i<s->numevents;i++)if(events[i].event>=5000)return 1;
     return 0;
 }
+/* GoldSrc's currententity persists after rendering, so GetCurrentEntity
+   still names the last drawn entity during later client callbacks. Xash
+   clears it outside drawing. v3 caches this value: its smoke lighting
+   (0x300437d0) relights a stand-in entity and then restores the "current"
+   entity from this query, and skips lighting entirely while that is NULL.
+   Every later smoke puff in the frame then used uninitialized stack values
+   as its colour (green/teal smoke). Report the last current entity of this
+   level instead of NULL, as GoldSrc does. */
+static uint32_t studio_current_entity(void)
+{
+    static uint32_t last,last_epoch;
+    uint32_t guest=entity_reference(studio.GetCurrentEntity?studio.GetCurrentEntity():NULL);
+    if(guest){last=guest;last_epoch=model_epoch;return guest;}
+    return last_epoch==model_epoch?last:0;
+}
 #define STUDIO_RET(v) do{c->eax=(uint32_t)(v);studio_sync(0,complete);c->esp+=4;return;}while(0)
 static void studio_dispatch(Ctx *c,unsigned slot)
 {
@@ -102,7 +117,7 @@ static void studio_dispatch(Ctx *c,unsigned slot)
     switch(slot){
     case BHL_STUDIO_IsHardware:RAW_RET(studio.IsHardware());
     case BHL_STUDIO_GetForceFaceFlags:RAW_RET(studio.GetForceFaceFlags());
-    case BHL_STUDIO_GetCurrentEntity:RAW_RET(entity_reference(studio.GetCurrentEntity()));
+    case BHL_STUDIO_GetCurrentEntity:RAW_RET(studio_current_entity());
     case BHL_STUDIO_GetViewEntity:RAW_RET(entity_reference(studio.GetViewEntity()));
     case BHL_STUDIO_GetTimes:studio.GetTimes((int*)gs(A(0)),(double*)gs(A(1)),(double*)gs(A(2)));RAW_RET(0);
     case BHL_STUDIO_GetViewInfo:studio.GetViewInfo((float*)gs(A(0)),(float*)gs(A(1)),(float*)gs(A(2)),(float*)gs(A(3)));RAW_RET(0);

@@ -69,11 +69,13 @@ def main():
     ap.add_argument('--no-spaces',action='store_true',help='Experiment: SDL fullscreen without a macOS fullscreen Space')
     ap.add_argument('--mouse',action='store_true',help='Leave mouse input active (captures the pointer while the game is focused)')
     ap.add_argument('--command',action='append',default=[],metavar='CONSOLE',help='Console command run after setup (repeatable; "wait N" waits N frames)')
+    ap.add_argument('--load',help='Load this save from the isolated data instead of --map')
     ap.add_argument('--name',required=True);ap.add_argument('--seconds',type=int,default=180)
     args=ap.parse_args()
     data=args.data.resolve();resources=args.app.resolve()/'Contents/Resources';runtime=resources/'Runtime'
     if not data.is_relative_to(ROOT/'work'):ap.error('Use isolated data under work/')
     if not args.map.replace('_','').isalnum():ap.error('Invalid map name')
+    if args.load and not args.load.replace('_','').isalnum():ap.error('Invalid save name')
     if not 10<=args.frames<=100000:ap.error('Use 10..100000 frames')
     if not 1<=args.fps_cap<=1000:ap.error('Use a frame limit from 1 through 1000')
     if Path(args.name).name!=args.name:ap.error('Name must be a filename component')
@@ -131,7 +133,7 @@ def main():
              *(['-borderless'] if args.fullscreen else ['-hidden','-windowed']),*([] if args.mouse else ['-nomouse']),'-width',str(args.width),'-height',str(args.height),'-noip','-noip6','-nomaster',
              '-nowriteconfig','-dev','3','+sv_lan','1','+cl_lw','0','+fps_max',str(args.fps_cap),'+gl_vsync',str(int(args.vsync)),
              '+host_framerate','0' if args.real_time else '0.008333333',
-             *[part for option in args.cvar for part in ('+'+option.partition('=')[0],option.partition('=')[2])],'+map',args.map,'+exec',script.name]
+             *[part for option in args.cvar for part in ('+'+option.partition('=')[0],option.partition('=')[2])],*(['+load',args.load] if args.load else ['+map',args.map]),'+exec',script.name]
     if args.renderer=='metal':command.insert(2,'-metal')
     began=time.monotonic();marks={};timeout=False;pending=b''
     expected=[args.core or runtime/'libbhl.dylib',args.client or runtime/'client_arm64.dylib',

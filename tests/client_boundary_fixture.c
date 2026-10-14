@@ -9,6 +9,7 @@ static float fixture_time(void){return 12.5f;}
 static int fixture_contents(const float *point,int *actual){assert(point[0]==8);*actual=-3;return -3;}
 static model_t *fixture_model(const char *name,int *index){assert(!strcmp(name,"fixture-model"));*index=11;return fixture_entities[1].model;}
 static cl_entity_t *studio_current(void){return &fixture_entities[1];}
+static cl_entity_t *studio_no_current(void){return NULL;}
 static int studio_bbox(void){assert(fixture_entities[1].origin[2]==44&&fixture_entities[2].origin[2]==0);fixture_entities[1].curstate.frame=77;return 1;}
 static void native_particle_think(particle_t *p,float frame){p->vel[1]+=frame;}
 static void original_temp_allocate(Ctx *c)
@@ -347,6 +348,19 @@ int main(void)
     studio.GetCurrentEntity=studio_current;studio.StudioCheckBBox=studio_bbox;
     Ctx draw={0};draw.esp=bhl_heap_alloc(16,1);studio_dispatch(&draw,BHL_STUDIO_StudioCheckBBox);
     assert(draw.eax==1&&g->curstate.frame==77&&((BhlClientEntity*)(G_MEM+other))->origin[2]==123&&fixture_entities[2].origin[2]==0);
+    /* GoldSrc keeps currententity after drawing; v3 smoke lighting depends on
+       it. Outside drawing, report the level's last current entity, never one
+       from a previous level. */
+    {
+        Ctx query={0};query.esp=bhl_heap_alloc(16,1);uint32_t sp=query.esp;
+        studio_dispatch(&query,BHL_STUDIO_GetCurrentEntity);uint32_t drawn=query.eax;assert(drawn);
+        studio.GetCurrentEntity=studio_no_current;query.esp=sp;
+        studio_dispatch(&query,BHL_STUDIO_GetCurrentEntity);assert(query.eax==drawn);
+        model_invalidate();query.esp=sp;
+        studio_dispatch(&query,BHL_STUDIO_GetCurrentEntity);assert(query.eax==0);
+        studio.GetCurrentEntity=studio_current;
+        puts("Studio current entity passed: persists after drawing within a level, cleared on level change");
+    }
     /* More identities than cache slots must not merge entities or discard
        pending guest writes. Re-query in reverse order after collisions. */
     cl_entity_t *many=calloc(4100,sizeof *many);uint32_t *ids=calloc(4100,sizeof *ids);
