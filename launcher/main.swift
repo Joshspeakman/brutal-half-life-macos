@@ -144,7 +144,7 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
             buildWindow()
             do { try installation.validate() } catch { view.note = error.localizedDescription; view.playEnabled = false }
             if let path = preview {
-                // development: the window as an image (--preview-open <group>, --preview-update <state>)
+                // development: the window as an image (--preview-open <group>)
                 if let name = argument("--preview-open"), let i = view.sections.firstIndex(where: { $0.title.caseInsensitiveCompare(name) == .orderedSame }) { view.open = i }
                 guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw failure("Cannot render preview") }
                 view.cacheDisplay(in: view.bounds, to: rep)
@@ -201,8 +201,6 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
         filesSection.summary = { "Saved games · Settings · Play logs" }
         updater = Updater.installed()
         updateState = updater == nil ? .unavailable : .checking
-        let updates = LaunchRow("Updates", [updateChoice()])
-        updates.activate = { [unowned self] in self.updatePressed() }
         let updatesSection = LaunchSection("Updates")
         updatesSection.summary = { [unowned self] in let c = self.updateChoice(); return c.note.isEmpty ? c.label : "\(c.label) · \(c.note)" }
         updatesSection.activate = { [unowned self] in self.updatePressed() }
@@ -222,8 +220,7 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
         updater?.choice(updateState, latest: latestCommit) ?? Updater(script: URL(fileURLWithPath: "/"), branch: "main", built: "").choice(.unavailable, latest: nil)
     }
     func refreshUpdates() {
-        for row in view.sections.flatMap({ $0.rows }) + view.top where row.title == "Updates" { row.choices = [updateChoice()] }
-        view.needsDisplay = true
+        view.needsDisplay = true                             // the Updates summary reads the state
     }
     func checkForUpdate() {
         guard let updater = updater else { return }
@@ -238,7 +235,7 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
     func updatePressed() {
-        guard let updater = updater, updateState != .checking else { return }
+        guard let updater = updater, updateState != .checking, child == nil else { return }   // never under a running game
         guard updateState == .available, let latest = latestCommit else { checkForUpdate(); return }
         let alert = NSAlert(); alert.messageText = updater.branch == "nightly" ? "Update to the newest Nightly?" : "Update to the newest version?"
         alert.informativeText = "The \(updater.branch) branch (\(latest.prefix(7))) is downloaded from GitHub and the app is rebuilt from your own copy of the game, "
