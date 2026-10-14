@@ -108,9 +108,30 @@ static void run_contracts(void)
     const char *envnames[]={"modulate","replace","decal","add"};
     const int expected[][3]={{32,32,24},{128,64,32},{96,96,111},{192,192,223}};
     for(int i=0;i<4;i++){clear();qTexEnvi(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,envs[i]);qColor4f(.25,.5,.75,.6);quad(-50,1);check(envnames[i],expected[i][0],expected[i][1],expected[i][2]);}
+    /* Overbright lightmaps and detail textures: COMBINE MODULATE with RGB_SCALE 2. */
+    {
+        const unsigned char base[]={64,32,16,255};texture(GL_RGBA,1,base);
+        qTexEnvi(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,0x8570 /* COMBINE_ARB */);
+        qTexEnvi(GL_TEXTURE_ENV,0x8571 /* COMBINE_RGB_ARB */,GL_MODULATE);
+        qTexEnvi(GL_TEXTURE_ENV,0x8580 /* SOURCE0_RGB_ARB */,0x8578 /* PREVIOUS_ARB */);
+        qTexEnvi(GL_TEXTURE_ENV,0x8581 /* SOURCE1_RGB_ARB */,GL_TEXTURE);
+        qTexEnvi(GL_TEXTURE_ENV,0x8572 /* COMBINE_ALPHA_ARB */,GL_REPLACE);
+        qTexEnvi(GL_TEXTURE_ENV,0x8588 /* SOURCE0_ALPHA_ARB */,0x8578);
+        qTexEnvi(GL_TEXTURE_ENV,0x8573 /* RGB_SCALE_ARB */,2);
+        clear();qColor4f(1,1,1,1);quad(-50,1);check("combine_modulate_x2",128,64,32);
+        qTexEnvi(GL_TEXTURE_ENV,0x8573,1);qTexEnvi(GL_TEXTURE_ENV,0x8572,GL_MODULATE);qTexEnvi(GL_TEXTURE_ENV,0x8588,GL_TEXTURE);
+        qTexEnvi(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,GL_MODULATE);
+    }
     /* An RGB texture ignores source alpha during DECAL. */
     texture(GL_RGB,1,rgba);qTexEnvi(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,GL_DECAL);
     clear();quad(-50,1);check("rgb_decal",128,64,32);
+    /* Greyscale images (sprites such as smoke) use one- and two-channel
+       internal formats with RGBA source data; they must stay grey. */
+    const unsigned char grey[]={100,100,100,200};
+    const int grey_formats[]={0x8045 /* LUMINANCE8_ALPHA8 */,0x8040 /* LUMINANCE8 */,0x804B /* INTENSITY8 */,0x190A /* LUMINANCE_ALPHA */};
+    const char *grey_names[]={"luminance8_alpha8","luminance8","intensity8","luminance_alpha"};
+    qTexEnvi(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,GL_REPLACE);
+    for(int i=0;i<4;i++){texture(grey_formats[i],1,grey);clear();quad(-50,1);check(grey_names[i],100,100,100);}
     const unsigned char stripe[]={255,0,0,255,0,0,255,255};texture(GL_RGBA,2,stripe);
     qTexEnvi(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,GL_REPLACE);qMatrixMode(GL_TEXTURE);qTranslatef(.5,0,0);
     clear();quad(-50,1);check("texture_matrix",0,0,255);qLoadIdentity();qMatrixMode(GL_MODELVIEW);

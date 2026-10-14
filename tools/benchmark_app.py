@@ -68,6 +68,7 @@ def main():
     ap.add_argument('--cvar',action='append',default=[],metavar='NAME=VALUE',help='Set an engine cvar at launch')
     ap.add_argument('--no-spaces',action='store_true',help='Experiment: SDL fullscreen without a macOS fullscreen Space')
     ap.add_argument('--mouse',action='store_true',help='Leave mouse input active (captures the pointer while the game is focused)')
+    ap.add_argument('--command',action='append',default=[],metavar='CONSOLE',help='Console command run after setup (repeatable; "wait N" waits N frames)')
     ap.add_argument('--name',required=True);ap.add_argument('--seconds',type=int,default=180)
     args=ap.parse_args()
     data=args.data.resolve();resources=args.app.resolve()/'Contents/Resources';runtime=resources/'Runtime'
@@ -94,6 +95,9 @@ def main():
     wait='wait\n'
     setup='sv_cheats 1\ngod\n'
     if args.attack:setup+='impulse 101\n'+wait*10+'weapon_9mmAR\n'+wait*30+'+attack\n'
+    for command in args.command:
+        if '\n' in command or ';' in command:ap.error('--command takes one console command')
+        setup+=command+'\n'
     capture=data/'bhl/scrshots/native-benchmark.png'
     if args.capture:capture.unlink(missing_ok=True)
     screenshot=wait*3+'snapshot scrshots/native-benchmark.png\n'+wait*3 if args.capture else ''
@@ -135,7 +139,7 @@ def main():
               runtime/f'libref_{args.renderer}.dylib']
     if args.renderer=='metal':expected += [runtime/'libEGL.dylib',runtime/'libGLESv2.dylib']
     report=dict(map=args.map,renderer=args.renderer,frames=args.frames,logical_size=[args.width,args.height],fixed_simulation_step=None if args.real_time else 1/120,
-                fps_cap=args.fps_cap,vsync=args.vsync,mouse=args.mouse,fullscreen_spaces=not args.no_spaces,cvars=args.cvar,diagnostic_env=args.env,present_trace=args.present_trace,max_drawables=args.max_drawables,display_sync=args.display_sync,fullscreen=args.fullscreen,audio=args.audio,attack=args.attack,profiling=args.bridge_profile,eager_entities=args.eager_entities,verify_entities=args.verify_entities,
+                fps_cap=args.fps_cap,vsync=args.vsync,commands=args.command,mouse=args.mouse,fullscreen_spaces=not args.no_spaces,cvars=args.cvar,diagnostic_env=args.env,present_trace=args.present_trace,max_drawables=args.max_drawables,display_sync=args.display_sync,fullscreen=args.fullscreen,audio=args.audio,attack=args.attack,profiling=args.bridge_profile,eager_entities=args.eager_entities,verify_entities=args.verify_entities,
                 libraries={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in expected})
     p=None
     try:

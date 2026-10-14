@@ -212,8 +212,15 @@ procedure resolver through `HUD_GetRenderInterface`, so its fog calls share
 the world renderer's shader state under Metal. The GLES adapter supports
 linear, exponential and squared-exponential fog with eye-space distance;
 MODULATE, REPLACE, DECAL and ADD texture environments; RGB/RGBA alpha semantics;
-and modelview/projection plus two texture matrices. General texture combiners
-remain unadvertised, allowing the engine's existing multipass paths to run.
+and modelview/projection plus two texture matrices. It also emulates the
+combiner subset the renderer uses for overbright lightmaps and detail textures:
+RGB MODULATE of the previous stage and the texture with RGB_SCALE 1, 2 or 4, and
+alpha that is either modulated or taken from the previous stage. Without the
+×2 scale, the Metal world rendered at half brightness whenever overbright was
+enabled. Intensity, alpha-only and unsized luminance-alpha uploads of RGBA data
+are converted to RGBA, because GLES rejected them and left those textures empty.
+General texture combiners remain unadvertised, allowing the engine's existing
+multipass paths to run.
 Windows global mouse-acceleration settings
 are reported unsupported; the original client handles the failure and uses
 SDL input. macOS system mouse preferences are not changed.

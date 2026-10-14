@@ -354,10 +354,13 @@ fallback rather than silently changing the backend.
 
 Client fog imports use the same shader state as the native world renderer.
 The adapter now implements all three fog equations with eye-space depth,
-texture environment modes and texture matrices. Seventeen GPU pixel-readback
+texture environment modes and texture matrices. Twenty-two GPU pixel-readback
 contracts compare expected results with both OpenGL and Metal, including
-lightmaps, indexed particle/beam batches, alpha cutouts, translucent/additive
-effects and depth ordering:
+lightmaps, the overbright ×2 combiner, greyscale and intensity texture formats,
+indexed particle/beam batches, alpha cutouts, translucent/additive effects and
+depth ordering. A reference capture of the original v3 release (Steam HL25,
+OpenGL, `gl_overbright 0`) on another PC matched both Mac renderers in the
+`_zoo` spawn view to within one level per channel:
 
 ```sh
 .venv/bin/python tests/test_render_contracts.py

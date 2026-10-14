@@ -105,7 +105,7 @@ reproduction commands and limits.
 | Native services | Tests cover codepages, heap ownership, locks, Unicode file I/O, directory searches, time conversion and binary CRT streams |
 | Server integration | GameInit, movement initialization and three delta encoders run through native callbacks |
 | Headless map | `c0a0` activates and completes at least ten server frames in a bounded session |
-| Client integration | Original movement, studio animation, entities and temporary effects cross the native boundary; Metal renders the campaign, showcase and view models; 17 GPU pixel contracts pass on both renderers |
+| Client integration | Original movement, studio animation, entities and temporary effects cross the native boundary; Metal renders the campaign, showcase and view models; 22 GPU pixel contracts pass on both renderers |
 | Audio | Original FMOD decodes WAV and game MP3 data to nonzero PCM; pause/resume, seek, volume, pan and shutdown checks pass on dummy audio and the native CoreAudio device |
 | VGUI | Original App, Label and Surface code produces text textures through CoreText, paints through the engine API and passes surface restart checks |
 | Saving | Original serializer handles fields, entities, time and landmarks; packaged tests cover fresh-process reload and the first tram landmark transition |
