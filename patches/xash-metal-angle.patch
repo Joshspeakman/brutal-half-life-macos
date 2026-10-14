@@ -1,6 +1,8 @@
+diff --git a/engine/client/dll_int/ref_common.c b/engine/client/dll_int/ref_common.c
+index 8ea38dc..25cbfcc 100644
 --- a/engine/client/dll_int/ref_common.c
 +++ b/engine/client/dll_int/ref_common.c
-@@ -689,6 +689,18 @@
+@@ -689,6 +689,18 @@ static void SetFullscreenModeFromCommandLine( void )
  
  static void R_CollectRendererNames( void )
  {
@@ -19,9 +21,11 @@
  	// ordering is important!
  	static const char *short_names[] =
  	{
+diff --git a/engine/platform/sdl2/vid_sdl2.c b/engine/platform/sdl2/vid_sdl2.c
+index e85afd2..0c2ba10 100644
 --- a/engine/platform/sdl2/vid_sdl2.c
 +++ b/engine/platform/sdl2/vid_sdl2.c
-@@ -332,6 +332,25 @@
+@@ -332,6 +332,25 @@ GL_GetProcAddress
  */
  void *GL_GetProcAddress( const char *name )
  {
@@ -47,7 +51,7 @@
  	void *func = SDL_GL_GetProcAddress( name );
  
  #if XASH_PSVITA
-@@ -927,11 +946,28 @@
+@@ -923,11 +942,28 @@ qboolean R_Init_Video( ref_graphic_apis_t type )
  		glw_state.software = true;
  		break;
  	case REF_GL:
@@ -76,7 +80,7 @@
  
  		if( SDL_GL_LoadLibrary( EGL_LIB ) < 0 )
  		{
-@@ -968,6 +1004,15 @@
+@@ -964,6 +1000,15 @@ qboolean R_Init_Video( ref_graphic_apis_t type )
  rserr_t R_ChangeDisplaySettings( int width, int height, window_mode_t window_mode )
  {
  	rserr_t err;
@@ -92,6 +96,8 @@
  
  	if( !host.hWnd )
  		err = VID_CreateWindow( width, height, window_mode );
+diff --git a/ref/gl/gl2_shim/fragment.glsl.inc b/ref/gl/gl2_shim/fragment.glsl.inc
+index 803bc2b..220dfc3 100644
 --- a/ref/gl/gl2_shim/fragment.glsl.inc
 +++ b/ref/gl/gl2_shim/fragment.glsl.inc
 @@ -25,6 +25,8 @@
@@ -103,7 +109,7 @@
  "#endif\n"
  "uniform PREC vec4 uColor;\n"
  "#if ATTR_COLOR\n"
-@@ -44,6 +46,13 @@
+@@ -44,6 +46,17 @@
  "#else\n"
  "#define oFragColor gl_FragColor\n"
  "#endif\n"
@@ -112,12 +118,16 @@
 +"    if (mode < 0.5) return c * t;\n"
 +"    if (mode < 1.5) return vec4(t.rgb, alpha > 0.5 ? t.a : c.a);\n"
 +"    if (mode < 2.5) return vec4(alpha > 0.5 ? mix(c.rgb, t.rgb, t.a) : t.rgb, c.a);\n"
-+"    return vec4(min(c.rgb + t.rgb, vec3(1.0)), c.a * t.a);\n"
++"    if (mode < 3.5) return vec4(min(c.rgb + t.rgb, vec3(1.0)), c.a * t.a);\n"
++"    float m = mode - 4.0;\n"
++"    float previousAlpha = m > 2.5 ? 1.0 : 0.0;\n"
++"    float scale = exp2(floor(mod(m + 0.5, 3.0)));\n"
++"    return vec4(min(c.rgb * t.rgb * scale, vec3(1.0)), mix(c.a * t.a, c.a, previousAlpha));\n"
 +"}\n"
  "void main()\n"
  "{\n"
  "#if ATTR_COLOR\n"
-@@ -52,18 +61,23 @@
+@@ -52,18 +65,23 @@
  "PREC vec4 c = uColor;\n"
  "#endif\n"
  "#if ATTR_TEXCOORD0\n"
@@ -145,20 +155,24 @@
  "c.rgb = mix(uFog.rgb, c.rgb, fogRate);\n"
  "#endif\n"
  "oFragColor = c;\n"
+diff --git a/ref/gl/gl2_shim/gl2_shim.c b/ref/gl/gl2_shim/gl2_shim.c
+index 91541c9..6a52e2e 100644
 --- a/ref/gl/gl2_shim/gl2_shim.c
 +++ b/ref/gl/gl2_shim/gl2_shim.c
-@@ -22,8 +22,8 @@
+@@ -22,8 +22,10 @@ gl2shim will not give much performance gain. It does not batch small drawcalls,
  It just allows to draw similar way as in native legacy context, but in es/core contexts
  
  Limitations:
 -1. Matrix support is very limited, only combined MVP
 -2. No TexEnv support, multitexture always works in MODULATE mode
 +1. Matrix stacks are not implemented. Modelview/projection and two texture matrices are supported.
-+2. TexEnv supports MODULATE, REPLACE, DECAL and ADD. General combiners are not advertised.
++2. TexEnv supports MODULATE, REPLACE, DECAL and ADD, plus the COMBINE subset the renderer uses
++   for overbright lightmaps and detail textures: RGB MODULATE of PREVIOUS and TEXTURE with
++   RGB_SCALE 1/2/4, and alpha MODULATE or REPLACE from PREVIOUS. General combiners are not advertised.
  3. DrawElements with client pointers will not work on CORE/WEBGL contexts, DrawRangeElements will
  4. No quads in arrays drawing (simple DrawArrays(GL_QUADS) may be implemented, but DrawElements not)
  5. Textures are enabled with texcoord attribs, not glEnable (can be changed, but who cares?)
-@@ -68,7 +68,7 @@
+@@ -68,7 +70,7 @@ typedef struct
  	GLint ualpha;
  	GLint utex0;
  	GLint utex1;
@@ -167,7 +181,7 @@
  	GLint uMVP;
  	GLuint *vao_begin;
  } gl2wrap_prog_t;
-@@ -95,8 +95,10 @@
+@@ -95,8 +97,10 @@ static struct
  	GLint end;
  	GLenum prim;
  	GLfloat color[4];
@@ -179,7 +193,7 @@
  	gl2wrap_prog_t progs[MAX_PROGS];
  	gl2wrap_prog_t *cur_prog;
  	GLboolean uchanged;
-@@ -118,7 +120,7 @@
+@@ -118,7 +122,7 @@ static struct
  
  static struct
  {
@@ -188,7 +202,7 @@
  	GLenum mode;
  	float *current;
  	uint64_t update;
-@@ -129,7 +131,7 @@
+@@ -129,7 +133,7 @@ static struct
  	qboolean alpha_test;
  	qboolean fog;
  	GLuint vbo;
@@ -197,7 +211,7 @@
  } gl2wrap_state;
  
  //#define QUAD_BATCH
-@@ -175,6 +177,48 @@
+@@ -175,6 +179,48 @@ static void (APIENTRY *rpglBindBufferARB)( GLenum buf, GLuint obj );
  
  static void GL2_FreeArrays( void );
  
@@ -246,7 +260,7 @@
  #ifdef QUAD_BATCH
  static void GL2_FlushPrims( void );
  static void (APIENTRY *rpglBindTexture)( GLenum tex, GLuint obj );
-@@ -366,6 +410,11 @@
+@@ -366,6 +412,11 @@ static gl2wrap_prog_t *GL2_GetProg( const GLuint flags )
  	prog->utex0  = pglGetUniformLocationARB( glprog, "uTex0" );
  	prog->utex1  = pglGetUniformLocationARB( glprog, "uTex1" );
  	prog->ufog   = pglGetUniformLocationARB( glprog, "uFog" );
@@ -258,7 +272,7 @@
  	prog->uMVP   = pglGetUniformLocationARB( glprog, "uMVP" );
  
  	if( gl2wrap_config.vao_mandatory )
-@@ -427,6 +476,10 @@
+@@ -427,6 +478,10 @@ static gl2wrap_prog_t *GL2_SetProg( const GLuint flags )
  				pglUniform4fvARB( prog->ucolor, 1, gl2wrap.color );
  			if( prog->ufog >= 0 )
  				pglUniform4fvARB( prog->ufog, 1, gl2wrap.fog );
@@ -269,7 +283,7 @@
  			gl2wrap.uchanged = GL_FALSE;
  		}
  		GL2_UpdateMVP( prog );
-@@ -604,7 +657,11 @@
+@@ -604,7 +659,11 @@ int GL2_ShimInit( void )
  	if( gEngfuncs.Sys_CheckParm( "-noincremental" ))
  		gl2wrap_config.incremental = gl2wrap_config.buf_storage = false;
  
@@ -281,7 +295,7 @@
  	if( gEngfuncs.Sys_CheckParm( "-minshaders" ))
  		gl2wrap_config.version = 100;
  	if( gl2wrap_config.buf_storage )
-@@ -628,6 +685,14 @@
+@@ -628,6 +687,14 @@ int GL2_ShimInit( void )
  		gl2wrap_config.cycle_buffers, gl2wrap_config.version );
  
  	memset( &gl2wrap, 0, sizeof( gl2wrap ));
@@ -296,7 +310,7 @@
  	GL2_ShimInstall();
  	GL2_InitTriQuads();
  
-@@ -635,6 +700,7 @@
+@@ -635,6 +702,7 @@ int GL2_ShimInit( void )
  	gl2wrap.color[1] = 1.f;
  	gl2wrap.color[2] = 1.f;
  	gl2wrap.color[3] = 1.f;
@@ -304,7 +318,7 @@
  	gl2wrap.uchanged = GL_TRUE;
  
  	total = 0;
-@@ -711,6 +777,12 @@
+@@ -711,6 +779,12 @@ int GL2_ShimInit( void )
  
  void GL2_ShimShutdown( void )
  {
@@ -317,7 +331,7 @@
  	if( !gl2wrap_init )
  		return;
  
-@@ -1029,6 +1101,17 @@
+@@ -1029,6 +1103,17 @@ static void (APIENTRY *rpglTexImage2D)( GLenum target, GLint level, GLint intern
  static void APIENTRY GL2_TexImage2D( GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *pixels )
  {
  	void *data = (void *)pixels;
@@ -335,15 +349,45 @@
  	if( pixels && format == GL_RGBA && (
  		internalformat == GL_RGB ||
  		internalformat == GL_RGB8 ||
-@@ -1206,22 +1289,27 @@
+@@ -1050,7 +1135,28 @@ static void APIENTRY GL2_TexImage2D( GLenum target, GLint level, GLint internalf
+ 		}
+ 		internalformat = format;
+ 	}
+-	if( internalformat == GL_LUMINANCE8_ALPHA8 || internalformat == GL_RGB || internalformat == GL_RGB8 || internalformat == GL_RGB5 )
++	else if( pixels && format == GL_RGBA && type == GL_UNSIGNED_BYTE && (
++		internalformat == GL_INTENSITY || internalformat == GL_INTENSITY8 ||
++		internalformat == GL_ALPHA || internalformat == GL_ALPHA8 ))
++	{
++		// GLES has no intensity or legacy alpha-only internal formats for RGBA
++		// data. Intensity replicates the red channel into all four; alpha-only
++		// keeps alpha over white, so MODULATE still yields the fragment colour.
++		const unsigned char *in = data;
++		const int size = width * height * 4;
++		unsigned char *out = (unsigned char *)malloc( size );
++		const qboolean intensity = internalformat == GL_INTENSITY || internalformat == GL_INTENSITY8;
++
++		data = out;
++		for( int i = 0; i < size; i += 4, in += 4, out += 4 )
++		{
++			out[0] = out[1] = out[2] = intensity ? in[0] : 255;
++			out[3] = intensity ? in[0] : in[3];
++		}
++		internalformat = GL_RGBA;
++	}
++	if( internalformat == GL_LUMINANCE8_ALPHA8 || internalformat == GL_LUMINANCE_ALPHA || internalformat == GL_LUMINANCE4_ALPHA4 ||
++		internalformat == GL_RGB || internalformat == GL_RGB8 || internalformat == GL_RGB5 )
+ 		internalformat = GL_RGBA;
+ 	rpglTexImage2D( target, level, internalformat, width, height, border, format, type, data );
+ 	if( data != pixels )
+@@ -1206,22 +1312,27 @@ static void APIENTRY GL2_AlphaFunc( GLenum mode, GLfloat ref )
  
  static void APIENTRY GL2_Fogf( GLenum param, GLfloat val )
  {
 -	if( param == GL_FOG_DENSITY )
--	{
--		gl2wrap.fog[3] = val;
 +	switch( param )
-+	{
+ 	{
+-		gl2wrap.fog[3] = val;
+-		gl2wrap.uchanged = GL_TRUE;
 +	case GL_FOG_MODE:
 +		gl2wrap.fogparams[0] = (int)val == GL_LINEAR ? 0.f : (int)val == GL_EXP2 ? 2.f : 1.f;
 +		break;
@@ -351,43 +395,35 @@
 +	case GL_FOG_END: gl2wrap.fogparams[2] = val; break;
 +	case GL_FOG_DENSITY: gl2wrap.fogparams[3] = val; break;
 +	default: return;
-+	}
-+	gl2wrap.uchanged = GL_TRUE;
-+}
-+
-+static void APIENTRY GL2_Fogfv( GLenum param, const GLfloat *val )
-+{
-+	if( param == GL_FOG_COLOR )
-+	{
-+		Vector4Copy( val, gl2wrap.fog );
- 		gl2wrap.uchanged = GL_TRUE;
  	}
--}
--
--static void APIENTRY GL2_Fogfv( GLenum param, const GLfloat *val )
--{
--	if( param == GL_FOG_COLOR )
--	{
++	gl2wrap.uchanged = GL_TRUE;
+ }
+ 
+ static void APIENTRY GL2_Fogfv( GLenum param, const GLfloat *val )
+ {
+ 	if( param == GL_FOG_COLOR )
+ 	{
 -		gl2wrap.fog[0] = val[0];
 -		gl2wrap.fog[1] = val[1];
 -		gl2wrap.fog[2] = val[2];
--		gl2wrap.uchanged = GL_TRUE;
--	}
++		Vector4Copy( val, gl2wrap.fog );
+ 		gl2wrap.uchanged = GL_TRUE;
+ 	}
 +	else GL2_Fogf( param, *val );
  }
  
  static qboolean GL2_SkipEnable( GLenum e )
-@@ -1276,6 +1364,9 @@
- 		break;
+@@ -1277,6 +1388,9 @@ static void APIENTRY GL2_MatrixMode( GLenum m )
  	case GL_PROJECTION:
  		gl2wrap_matrix.current = gl2wrap_matrix.pr;
-+		break;
+ 		break;
 +	case GL_TEXTURE:
 +		gl2wrap_matrix.current = gl2wrap_state.active_tmu < 2 ? gl2wrap_matrix.tex[gl2wrap_state.active_tmu] : gl2wrap_matrix.dummy;
- 		break;
++		break;
  	default:
  		gl2wrap_matrix.current = gl2wrap_matrix.dummy;
-@@ -1350,6 +1441,10 @@
+ 		break;
+@@ -1350,6 +1464,10 @@ static void GL2_UpdateMVP( gl2wrap_prog_t *prog )
  		ClearBits( gl2wrap_matrix.update, BIT64( prog->flags ));
  		GL2_Mul4x4( gl2wrap_matrix.mv, gl2wrap_matrix.pr, gl2wrap_matrix.mvp );
  		pglUniformMatrix4fvARB( prog->uMVP, 1, false, (void *)gl2wrap_matrix.mvp );
@@ -398,7 +434,7 @@
  	}
  }
  
-@@ -1732,12 +1827,13 @@
+@@ -1732,12 +1850,13 @@ static void APIENTRY GL2_BindBufferARB( GLenum buf, GLuint obj )
  	rpglBindBufferARB( buf, obj );
  }
  
@@ -407,16 +443,15 @@
  static void APIENTRY GL2_ActiveTextureARB( GLenum tex )
  {
 -	//gl2wrap_arrays.texture = GL_TEXTURE0_ARB - tex;
--}
--#endif
 +	gl2wrap_state.active_tmu = tex - GL_TEXTURE0_ARB;
 +	if( gl2wrap_matrix.mode == GL_TEXTURE ) GL2_MatrixMode( GL_TEXTURE );
 +	rpglActiveTextureARB( tex );
-+}
+ }
+-#endif
  
  static void APIENTRY GL2_ClientActiveTextureARB( GLenum tex )
  {
-@@ -1767,22 +1863,37 @@
+@@ -1767,22 +1886,62 @@ static void APIENTRY GL2_Hint(GLenum target, GLenum mode)
  
  static void APIENTRY GL2_Scalef(GLfloat x, GLfloat y, GLfloat z)
  {
@@ -432,10 +467,35 @@
 +	gl2wrap_matrix.update = ~0ULL;
  }
  
++static struct
++{
++	GLenum mode, combine_alpha, source0_alpha;
++	GLint rgb_scale;
++} gl2wrap_texenv[2] = { { GL_MODULATE, GL_MODULATE, GL_TEXTURE, 1 }, { GL_MODULATE, GL_MODULATE, GL_TEXTURE, 1 } };
++
  static void APIENTRY GL2_TexEnvi(GLenum target, GLenum pname, GLint param)
  {
-+	if( target != GL_TEXTURE_ENV || pname != GL_TEXTURE_ENV_MODE || gl2wrap_state.active_tmu >= 2 ) return;
++	if( target != GL_TEXTURE_ENV || gl2wrap_state.active_tmu >= 2 ) return;
++	int unit = gl2wrap_state.active_tmu;
++
++	switch( pname )
++	{
++	case GL_TEXTURE_ENV_MODE: gl2wrap_texenv[unit].mode = param; break;
++	case GL_RGB_SCALE_ARB: gl2wrap_texenv[unit].rgb_scale = param; break;
++	case GL_COMBINE_ALPHA_ARB: gl2wrap_texenv[unit].combine_alpha = param; break;
++	case GL_SOURCE0_ALPHA_ARB: gl2wrap_texenv[unit].source0_alpha = param; break;
++	default: return; // RGB sources/operands: only PREVIOUS * TEXTURE is emulated
++	}
++
++	param = gl2wrap_texenv[unit].mode;
 +	GLfloat mode = param == GL_REPLACE ? 1.f : param == GL_DECAL ? 2.f : param == GL_ADD ? 3.f : 0.f;
++	if( param == GL_COMBINE_ARB )
++	{
++		// 4 + scale index (x1, x2, x4) + 3 when alpha is taken from the previous stage
++		GLint scale = gl2wrap_texenv[unit].rgb_scale;
++		GLboolean alpha_previous = gl2wrap_texenv[unit].combine_alpha == GL_REPLACE && gl2wrap_texenv[unit].source0_alpha == GL_PREVIOUS_ARB;
++		mode = 4.f + ( scale >= 4 ? 2.f : scale >= 2 ? 1.f : 0.f ) + ( alpha_previous ? 3.f : 0.f );
++	}
 +	if( gl2wrap.texenv[gl2wrap_state.active_tmu] != mode )
 +	{
 +		gl2wrap.texenv[gl2wrap_state.active_tmu] = mode;
@@ -454,7 +514,7 @@
  }
  
  static void APIENTRY GL2_ShadeModel(GLenum mode)
-@@ -1839,9 +1950,7 @@
+@@ -1839,9 +1998,7 @@ void GL2_ShimInstall( void )
  	GL2_OVERRIDE_PTR( TexEnvi )
  	GL2_OVERRIDE_PTR( TexEnvf )
  	GL2_OVERRIDE_PTR( ClientActiveTextureARB )
@@ -465,18 +525,18 @@
  	GL2_OVERRIDE_PTR( Fogi )
  	GL2_OVERRIDE_PTR( ShadeModel )
  #if XASH_GLES
-@@ -1870,9 +1979,7 @@
+@@ -1870,9 +2027,7 @@ void GL2_ShimInstall( void )
  	GL2_OVERRIDE_PTR( ColorPointer )
  	GL2_OVERRIDE_PTR( TexCoordPointer )
  
 -#ifdef QUAD_BATCH
  	GL2_OVERRIDE_PTR_B( BindTexture )
-+	GL2_AllocArrays();
-+}
- #endif
--	GL2_AllocArrays();
--}
 -#endif
+ 	GL2_AllocArrays();
+ }
+ #endif
+diff --git a/ref/gl/gl2_shim/vertex.glsl.inc b/ref/gl/gl2_shim/vertex.glsl.inc
+index 70986c0..0a51712 100644
 --- a/ref/gl/gl2_shim/vertex.glsl.inc
 +++ b/ref/gl/gl2_shim/vertex.glsl.inc
 @@ -34,10 +34,19 @@
@@ -511,9 +571,11 @@
 +"vTexCoord1 = (uTexMatrix1 * vec4(inTexCoord1, 0.0, 1.0)).xy;\n"
  "#endif\n"
  "}\n"
+diff --git a/ref/gl/gl_context.c b/ref/gl/gl_context.c
+index d32a432..706d928 100644
 --- a/ref/gl/gl_context.c
 +++ b/ref/gl/gl_context.c
-@@ -381,6 +381,45 @@
+@@ -381,6 +381,45 @@ static void GAME_EXPORT R_OverrideTextureSourceSize( unsigned int texnum, uint s
  
  static void* GAME_EXPORT R_GetProcAddress( const char *name )
  {
@@ -559,9 +621,11 @@
  #if XASH_GL4ES
  	return gl4es_GetProcAddress( name );
  #else // TODO: other wrappers
+diff --git a/ref/gl/gl_opengl.c b/ref/gl/gl_opengl.c
+index f05a3dd..fdc1ae7 100644
 --- a/ref/gl/gl_opengl.c
 +++ b/ref/gl/gl_opengl.c
-@@ -184,10 +184,17 @@
+@@ -184,10 +184,17 @@ static const dllfunc_t opengl_110funcs[] =
  
  static const dllfunc_t debugoutputfuncs[] =
  {
@@ -579,7 +643,7 @@
  };
  
  static const dllfunc_t multitexturefuncs[] =
-@@ -265,7 +272,13 @@
+@@ -265,7 +272,13 @@ static const dllfunc_t mapbufferrangefuncs[] =
  
  static const dllfunc_t drawrangeelementsbasevertexfuncs[] =
  {
@@ -593,7 +657,7 @@
  };
  
  static const dllfunc_t bufferstoragefuncs[] =
-@@ -817,7 +830,11 @@
+@@ -817,7 +830,11 @@ static void GL_InitExtensionsGLES( void )
  			}
  			GL_SetExtension( extid, true ); // required to be supported by wrapper
  
@@ -605,7 +669,7 @@
  			if( glConfig.max_texture_units <= 1 )
  				pglGetIntegerv( GL_MAX_TEXTURE_IMAGE_UNITS_ARB, &glConfig.max_texture_units );
  			if( glConfig.max_texture_units <= 1 )
-@@ -919,7 +936,8 @@
+@@ -919,7 +936,8 @@ static void GL_InitExtensionsGLES( void )
  		}
  	}
  #if !XASH_GL_STATIC
@@ -615,7 +679,7 @@
  #endif
  }
  #else
-@@ -1105,6 +1123,23 @@
+@@ -1105,6 +1123,23 @@ void GL_InitExtensions( void )
  	glConfig.vendor_string = (const char *)pglGetString( GL_VENDOR );
  	glConfig.renderer_string = (const char *)pglGetString( GL_RENDERER );
  	glConfig.version_string = (const char *)pglGetString( GL_VERSION );
@@ -639,7 +703,7 @@
  	glConfig.extensions_string = (const char *)pglGetString( GL_EXTENSIONS );
  
  	pglGetIntegerv( GL_MAJOR_VERSION, &major );
-@@ -1453,7 +1488,10 @@
+@@ -1453,7 +1488,10 @@ void GL_SetupAttributes( int safegl )
  #if XASH_GLES
  	gEngfuncs.GL_SetAttribute( REF_GL_CONTEXT_PROFILE_MASK, REF_GL_CONTEXT_PROFILE_ES );
  	gEngfuncs.GL_SetAttribute( REF_GL_CONTEXT_EGL, 1 );
@@ -651,9 +715,11 @@
  	gEngfuncs.GL_SetAttribute( REF_GL_CONTEXT_MAJOR_VERSION, 1 );
  	gEngfuncs.GL_SetAttribute( REF_GL_CONTEXT_MINOR_VERSION, 1 );
  #else // !XASH_NANOGL
+diff --git a/ref/gl/wscript b/ref/gl/wscript
+index c6503a6..d71f925 100644
 --- a/ref/gl/wscript
 +++ b/ref/gl/wscript
-@@ -56,6 +56,11 @@
+@@ -56,6 +56,11 @@ def build(bld):
  			'libs':    ['DL', 'gl4es', 'LOG'],
  			'defines': ['XASH_GL_STATIC=1', 'XASH_GL4ES=1'],
  		},
