@@ -112,89 +112,146 @@ struct Installation {
 final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var installation: Installation!
     var window: NSWindow!
-    var content: Backdrop!
-    var mode: NSPopUpButton!, display: NSPopUpButton!, difficulty: NSPopUpButton!, frameRate: NSPopUpButton!
-    var fullscreen: NSButton!, vsync: NSButton!, aroundNotch: NSButton!, play: MetalButton!, status: NSTextField!
+    var view: LaunchView!
+    // Rows backed by the launcher's existing preference keys, so earlier choices carry over.
+    var startRow: LaunchRow!, difficultyRow: LaunchRow!
+    var fullscreenRow: LaunchRow!, notchRow: LaunchRow!, sizeRow: LaunchRow!, frameRateRow: LaunchRow!, vsyncRow: LaunchRow!
+    var updater: Updater?
+    var updateState = UpdateState.unavailable, latestCommit: String?
     var child: Process?
     var output: FileHandle?
     var sessionLock: Int32 = -1
     var crashMonitor: Timer?
     var lastFailure: String?
     let defaults = UserDefaults.standard
-    var preview: String? {
+    func argument(_ name: String) -> String? {
         let args = CommandLine.arguments
-        guard let i = args.firstIndex(of: "--preview"), i + 1 < args.count else { return nil }
+        guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
         return args[i + 1]
     }
+    var preview: String? { argument("--preview") }
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
             defaults.register(defaults: ["difficulty": 1, "vsync": true, "aroundNotch": true])
-            if let i = CommandLine.arguments.firstIndex(of: "--write-iconset"), i + 1 < CommandLine.arguments.count {
-                try writeIconset(URL(fileURLWithPath: CommandLine.arguments[i + 1])); exit(0)
-            }
+            if let path = argument("--write-iconset") { try writeIconset(URL(fileURLWithPath: path)); exit(0) }
             installation = try Installation()
             if CommandLine.arguments.contains("--validate-install") { try installation.validate(); print("Installation validated"); exit(0) }
-            if let i = CommandLine.arguments.firstIndex(of: "--engine-test"), i + 1 < CommandLine.arguments.count {
-                try start(testScript: CommandLine.arguments[i + 1]); return
-            }
+            if let script = argument("--engine-test") { try start(testScript: script); return }
             NSApp.setActivationPolicy(preview == nil ? .regular : .accessory)
             let menu = NSMenu(), item = NSMenuItem(); menu.addItem(item); item.submenu = NSMenu()
             item.submenu?.addItem(withTitle: "Quit Brutal Half-Life", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
             NSApp.mainMenu = menu
             buildWindow()
+            do { try installation.validate() } catch { view.note = error.localizedDescription; view.playEnabled = false }
             if let path = preview {
-                content.layoutSubtreeIfNeeded()
-                guard let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) else { throw failure("Cannot render preview") }
-                content.cacheDisplay(in: content.bounds, to: rep)
+                // development: the window as an image (--preview-open <group>, --preview-update <state>)
+                if let name = argument("--preview-open"), let i = view.sections.firstIndex(where: { $0.title.caseInsensitiveCompare(name) == .orderedSame }) { view.open = i }
+                guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw failure("Cannot render preview") }
+                view.cacheDisplay(in: view.bounds, to: rep)
                 try rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: path))
                 exit(0)
             }
-            do { try installation.validate() } catch { status.stringValue = error.localizedDescription; play.isEnabled = false }
-            window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+            window.center(); window.makeKeyAndOrderFront(nil); window.makeFirstResponder(view); NSApp.activate(ignoringOtherApps: true)
+            checkForUpdate()
         } catch {
             if CommandLine.arguments.count > 1 { fputs(error.localizedDescription + "\n", stderr); exit(1) }
             NSAlert(error: error).runModal(); NSApp.terminate(nil)
         }
     }
-    func button(_ title: String, _ rect: NSRect, _ action: Selector) -> MetalButton {
-        let b = MetalButton(frame: rect); b.title = title; b.target = self; b.action = action; b.isBordered = false
-        b.setAccessibilityLabel(title); content.addSubview(b); return b
-    }
-    func picker(_ title: String, _ choices: [String], y: CGFloat, key: String) -> NSPopUpButton {
-        content.addSubview(label(title, NSRect(x: 42, y: y + 5, width: 215, height: 25), size: 18, color: gold))
-        let p = NSPopUpButton(frame: NSRect(x: 265, y: y, width: 430, height: 32)); p.addItems(withTitles: choices)
-        p.selectItem(at: min(max(defaults.integer(forKey: key), 0), choices.count - 1))
-        p.font = copper(16); p.setAccessibilityLabel(title); content.addSubview(p); return p
-    }
     func buildWindow() {
-        content = Backdrop(frame: NSRect(x: 0, y: 0, width: 740, height: 703))
-        window = NSWindow(contentRect: content.bounds, styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+        typealias C = LaunchRow.Choice
+        let hz = NSScreen.main?.maximumFramesPerSecond ?? 60
+        startRow = LaunchRow("Start", [C(value: "menu", label: "Game Menu", note: "New game, chapters, saves and options"),
+                                       C(value: "campaign", label: "New Campaign", note: "Straight into the campaign hub"),
+                                       C(value: "showcase", label: "Weapon Showcase", note: "Every weapon, in v3's test range"),
+                                       C(value: "latest", label: "Continue", note: "Your most recent save")],
+                             index: defaults.integer(forKey: "mode"))
+        difficultyRow = LaunchRow("Difficulty", [C(value: "1", label: "Easy", note: "For a new game"),
+                                                 C(value: "2", label: "Normal", note: "For a new game"),
+                                                 C(value: "3", label: "Hard", note: "For a new game")],
+                                  index: defaults.integer(forKey: "difficulty"))
+        fullscreenRow = LaunchRow("Screen", [C(value: "window", label: "Window", note: "A window of the size below"),
+                                             C(value: "fullscreen", label: "Fullscreen", note: "Your display's resolution; Game Mode turns on")],
+                                  index: defaults.bool(forKey: "fullscreen") ? 1 : 0)
+        notchRow = LaunchRow("Notch", [C(value: "around", label: "Around the Notch", note: "The whole display; lowest latency"),
+                                       C(value: "below", label: "Below the Notch", note: "A macOS fullscreen Space under the camera")],
+                             index: defaults.bool(forKey: "aroundNotch") ? 0 : 1)
+        sizeRow = LaunchRow("Window Size", ["1280 × 720", "1600 × 900", "1920 × 1080", "2560 × 1440"].map { C(value: $0, label: $0, note: "Windowed play") },
+                            index: defaults.integer(forKey: "resolution"))
+        frameRateRow = LaunchRow("Frame Rate", [C(value: "120", label: "120 FPS", note: hz >= 120 ? "This display's refresh rate" : "A limit above this display's \(hz) Hz"),
+                                                C(value: "60", label: "60 FPS", note: "Cooler and quieter"),
+                                                C(value: "uncapped", label: "Uncapped", note: "As fast as the game runs")],
+                                 index: defaults.integer(forKey: "frameRate"))
+        vsyncRow = LaunchRow("VSync", [C(value: "on", label: "On", note: "No tearing; paced for low latency around the notch"),
+                                       C(value: "off", label: "Off", note: "Tears and presents frames unevenly")],
+                             index: defaults.bool(forKey: "vsync") ? 0 : 1)
+        let display = LaunchSection("Display", rows: [fullscreenRow, notchRow, sizeRow, frameRateRow, vsyncRow])
+        display.summary = { [unowned self] in
+            let screen = self.fullscreenRow.value == "fullscreen" ? (self.notchRow.value == "around" ? "Fullscreen around the notch" : "Fullscreen below the notch") : "Window " + self.sizeRow.label
+            return "\(screen) · \(self.frameRateRow.label) · VSync \(self.vsyncRow.label)"
+        }
+        let guide = LaunchSection("Key Guide")
+        guide.summary = { "WASD · Mouse · R reload · E use · F flashlight · F5 / F6" }
+        guide.activate = { [unowned self] in self.controls() }
+        let saves = LaunchRow("Saved Games", [C(value: "", label: "Open in Finder", note: "Your saves, kept across updates")])
+        saves.activate = { [unowned self] in self.openSaves() }
+        let files = LaunchRow("Files & Log", [C(value: "", label: "Open in Finder", note: "Game data, settings and play logs")])
+        files.activate = { [unowned self] in self.openFiles() }
+        let filesSection = LaunchSection("Files", rows: [saves, files])
+        filesSection.summary = { "Saved games · Settings · Play logs" }
+        updater = Updater.installed()
+        updateState = updater == nil ? .unavailable : .checking
+        let updates = LaunchRow("Updates", [updateChoice()])
+        updates.activate = { [unowned self] in self.updatePressed() }
+        let updatesSection = LaunchSection("Updates")
+        updatesSection.summary = { [unowned self] in let c = self.updateChoice(); return c.note.isEmpty ? c.label : "\(c.label) · \(c.note)" }
+        updatesSection.activate = { [unowned self] in self.updatePressed() }
+        view = LaunchView(frame: NSRect(x: 0, y: 0, width: 780, height: 800))   // the ports' 760, plus room for the second top row
+        view.top = [startRow, difficultyRow]
+        view.sections = [display, guide, filesSection, updatesSection]
+        view.backdrop = launcherArt("backdrop")
+        view.note = "Metal graphics. Controls, sound and video detail are in the game's own Options."
+        view.onPlay = { [unowned self] in self.playGame() }
+        view.onQuit = { NSApp.terminate(nil) }
+        window = NSWindow(contentRect: view.frame, styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = "Brutal Half-Life"; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
-        window.appearance = NSAppearance(named: .darkAqua); window.isReleasedWhenClosed = false; window.delegate = self; window.contentView = content
-        mode = picker("START", ["Game menu", "New campaign", "Weapon showcase", "Continue latest save"], y: 245, key: "mode")
-        display = picker("RESOLUTION", ["1280 × 720", "1600 × 900", "1920 × 1080", "2560 × 1440"], y: 294, key: "resolution")
-        display.toolTip = "Window size. Native fullscreen uses your display's desktop resolution."
-        frameRate = picker("FRAME RATE", ["120 FPS limit", "60 FPS limit", "Uncapped"], y: 343, key: "frameRate")
-        difficulty = picker("DIFFICULTY", ["Easy", "Normal", "Hard"], y: 392, key: "difficulty")
-        fullscreen = NSButton(checkboxWithTitle: "Fullscreen", target: nil, action: nil)
-        fullscreen.toolTip = "Use macOS fullscreen, with automatic Game Mode when enabled in macOS."
-        fullscreen.frame = NSRect(x: 265, y: 438, width: 130, height: 30); fullscreen.state = defaults.bool(forKey: "fullscreen") ? .on : .off
-        content.addSubview(fullscreen)
-        aroundNotch = NSButton(checkboxWithTitle: "Around notch", target: nil, action: nil)
-        aroundNotch.toolTip = "Fullscreen covers the whole display, including the area beside the camera. Lowest latency; the camera hides a small strip at the top centre. Off keeps the picture below the camera in a macOS fullscreen Space."
-        aroundNotch.frame = NSRect(x: 400, y: 438, width: 160, height: 30); aroundNotch.state = defaults.bool(forKey: "aroundNotch") ? .on : .off
-        content.addSubview(aroundNotch)
-        vsync = NSButton(checkboxWithTitle: "VSync", target: nil, action: nil)
-        vsync.toolTip = "Steady frames without tearing. In fullscreen around the notch, frames are paced for low latency."
-        vsync.frame = NSRect(x: 570, y: 438, width: 125, height: 30); vsync.state = defaults.bool(forKey: "vsync") ? .on : .off
-        content.addSubview(vsync)
-        _ = button("CONTROLS", NSRect(x: 40, y: 494, width: 208, height: 46), #selector(controls))
-        _ = button("SAVED GAMES", NSRect(x: 266, y: 494, width: 208, height: 46), #selector(openSaves))
-        _ = button("FILES & LOG", NSRect(x: 492, y: 494, width: 208, height: 46), #selector(openFiles))
-        status = label("Metal graphics · Local development build", NSRect(x: 40, y: 565, width: 660, height: 42), size: 12, color: muted)
-        status.alignment = .center; content.addSubview(status)
-        let quit = button("QUIT", NSRect(x: 141, y: 632, width: 220, height: 52), #selector(quitApp)); quit.keyEquivalent = "\u{1b}"
-        play = button("PLAY", NSRect(x: 379, y: 632, width: 220, height: 52), #selector(playGame)); play.primary = true; play.keyEquivalent = "\r"
+        window.isMovableByWindowBackground = true; window.backgroundColor = .black
+        window.appearance = NSAppearance(named: .darkAqua); window.isReleasedWhenClosed = false; window.delegate = self; window.contentView = view
+    }
+    func updateChoice() -> LaunchRow.Choice {
+        updater?.choice(updateState, latest: latestCommit) ?? Updater(script: URL(fileURLWithPath: "/"), branch: "main", built: "").choice(.unavailable, latest: nil)
+    }
+    func refreshUpdates() {
+        for row in view.sections.flatMap({ $0.rows }) + view.top where row.title == "Updates" { row.choices = [updateChoice()] }
+        view.needsDisplay = true
+    }
+    func checkForUpdate() {
+        guard let updater = updater else { return }
+        updateState = .checking; refreshUpdates()
+        DispatchQueue.global(qos: .utility).async {
+            let latest = updater.check()
+            DispatchQueue.main.async {
+                self.latestCommit = latest
+                self.updateState = latest == nil ? .failed : latest == updater.built ? .current : .available
+                self.refreshUpdates()
+            }
+        }
+    }
+    func updatePressed() {
+        guard let updater = updater, updateState != .checking else { return }
+        guard updateState == .available, let latest = latestCommit else { checkForUpdate(); return }
+        let alert = NSAlert(); alert.messageText = updater.branch == "nightly" ? "Update to the newest Nightly?" : "Update to the newest version?"
+        alert.informativeText = "The \(updater.branch) branch (\(latest.prefix(7))) is downloaded from GitHub and the app is rebuilt from your own copy of the game, "
+            + "which usually takes several minutes. Your game data, saves and settings are kept. The app restarts when it is done."
+        alert.addButton(withTitle: "Update"); alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        if updater.run(over: window, log: installation.data.appendingPathComponent("Update.log")) {
+            // restart: the rebuilt app, then this one ends
+            let open = Process(); open.executableURL = URL(fileURLWithPath: "/usr/bin/open"); open.arguments = ["-n", Bundle.main.bundlePath]
+            try? open.run(); open.waitUntilExit()
+            exit(0)
+        }
+        checkForUpdate()
     }
     @objc func controls() {
         let alert = NSAlert(); alert.messageText = "Brutal Half-Life controls"
@@ -206,13 +263,12 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
         catch { NSAlert(error: error).runModal() }
     }
     @objc func openFiles() { NSWorkspace.shared.open(installation.data) }
-    @objc func quitApp() { NSApp.terminate(nil) }
-    @objc func playGame() {
+    func playGame() {
         do {
-            defaults.set(mode.indexOfSelectedItem, forKey: "mode"); defaults.set(display.indexOfSelectedItem, forKey: "resolution")
-            defaults.set(difficulty.indexOfSelectedItem, forKey: "difficulty"); defaults.set(fullscreen.state == .on, forKey: "fullscreen")
-            defaults.set(frameRate.indexOfSelectedItem, forKey: "frameRate"); defaults.set(vsync.state == .on, forKey: "vsync")
-            defaults.set(aroundNotch.state == .on, forKey: "aroundNotch")
+            defaults.set(startRow.index, forKey: "mode"); defaults.set(sizeRow.index, forKey: "resolution")
+            defaults.set(difficultyRow.index, forKey: "difficulty"); defaults.set(fullscreenRow.value == "fullscreen", forKey: "fullscreen")
+            defaults.set(frameRateRow.index, forKey: "frameRate"); defaults.set(vsyncRow.value == "on", forKey: "vsync")
+            defaults.set(notchRow.value == "around", forKey: "aroundNotch")
             try start()
         } catch { NSAlert(error: error).runModal() }
     }
@@ -225,11 +281,11 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
             throw failure("This installation is already running.")
         }
         do {
-            let p = try installation.process(mode: mode?.indexOfSelectedItem ?? 0, resolution: display?.indexOfSelectedItem ?? 0,
-                                             fullscreen: testScript != nil ? CommandLine.arguments.contains("--engine-test-fullscreen") : fullscreen?.state == .on,
-                                             difficulty: difficulty?.indexOfSelectedItem ?? 1,
-                                             frameRate: frameRate?.indexOfSelectedItem ?? 0, vsync: vsync?.state != .off,
-                                             aroundNotch: testScript != nil ? CommandLine.arguments.contains("--engine-test-notch") : aroundNotch?.state == .on, testScript: testScript)
+            let p = try installation.process(mode: startRow?.index ?? 0, resolution: sizeRow?.index ?? 0,
+                                             fullscreen: testScript != nil ? CommandLine.arguments.contains("--engine-test-fullscreen") : fullscreenRow?.value == "fullscreen",
+                                             difficulty: difficultyRow?.index ?? 1,
+                                             frameRate: frameRateRow?.index ?? 0, vsync: vsyncRow?.value != "off",
+                                             aroundNotch: testScript != nil ? CommandLine.arguments.contains("--engine-test-notch") : notchRow?.value == "around", testScript: testScript)
             let handle = try installation.openPlayLog(for: p)
             p.standardOutput = handle; p.standardError = handle; output = handle
             // Inherit the same lock through stdin. If the launcher crashes,

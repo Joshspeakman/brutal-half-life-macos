@@ -12,6 +12,7 @@ import plistlib
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -155,6 +156,8 @@ def main():
     ap.add_argument('--app', type=Path, default=ROOT/'work/package/Brutal Half-Life.app')
     ap.add_argument('--data-dir', type=Path, default=ROOT/'work/app-data')
     ap.add_argument('--replace', action='store_true', help='Replace an existing app from this project, preserving its separate user data')
+    ap.add_argument('--updater', type=Path, help='The launch window\'s updater script (install.sh writes it)')
+    ap.add_argument('--branch', default='main', choices=['main', 'nightly'], help='The branch the updater follows')
     args = ap.parse_args()
     archive, valve = args.archive.expanduser().resolve(), args.valve.expanduser().resolve()
     app, data = args.app.expanduser().absolute(), args.data_dir.expanduser().resolve()
@@ -203,6 +206,14 @@ def main():
                     NSPrincipalClass='NSApplication', CFBundleIconFile='BrutalHalfLife', BHLDataDirectory=str(data))
         with (staging/'Contents/Info.plist').open('wb') as stream:
             plistlib.dump(info, stream)
+        # the launch window's art and the icon's: the mod's own menu background (tools/bhl_art.py)
+        art = subprocess.run([sys.executable, ROOT/'tools/bhl_art.py', data/'bhl', resources/'art'], capture_output=True, text=True)
+        print(f'Launch window art: {art.stdout.strip()}' if art.returncode == 0 else 'No launch window art: the window writes the title')
+        if args.updater:
+            shutil.copy2(args.updater, macos/'update'); (macos/'update').chmod(0o755)
+            run('codesign', '--force', '--sign', '-', macos/'update')     # code in Contents/MacOS must be signed too
+            with (resources/'Update.plist').open('wb') as stream:
+                plistlib.dump(dict(branch=args.branch), stream)
         iconset = staging/'BrutalHalfLife.iconset'
         run(macos/'BrutalHalfLife', '--write-iconset', iconset)
         run('iconutil', '-c', 'icns', iconset, '-o', resources/'BrutalHalfLife.icns')

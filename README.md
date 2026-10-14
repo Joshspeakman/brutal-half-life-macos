@@ -62,12 +62,27 @@ The bundle carries its native runtime libraries, prepared image data, icon and
 menu artwork. It does not require Homebrew at launch. It is a local build from
 owned inputs, not an artifact to distribute.
 
-The launcher offers the game menu, campaign hub, weapon showcase, and latest
-save, plus resolution, fullscreen, difficulty, a frame limit and VSync. The
-default frame limit is 120 FPS; this is a ceiling, not a sustained-performance
-guarantee. A 60 FPS limit and uncapped mode (engine ceiling: 1,000 FPS) are also
-available. The Controls button explains
-v3's bindings; detailed input/audio/video settings remain in the game menu.
+The launch window follows the other native ports' launchers, drawn over the
+mod's own menu art (the app icon is cropped from the same art). Its rows choose
+where to start (game menu, campaign hub, weapon showcase or latest save) and
+the difficulty. **Display** holds fullscreen, Around/Below the notch, window
+size, the frame limit and VSync; **Key Guide** explains v3's bindings;
+**Files** opens the saves and the data folder; **Updates** is described below.
+Arrows, Return and Escape work as well as the mouse. The default frame limit
+is 120 FPS; this is a ceiling, not a sustained-performance guarantee. A 60 FPS
+limit and uncapped mode (engine ceiling: 1,000 FPS) are also available.
+Detailed input/audio/video settings remain in the game menu.
+
+**Updates.** An app installed from a clone of the GitHub repository checks,
+each time the launch window opens, whether `main` moved past the commit it was
+built from (`--branch nightly` follows `nightly` instead). Pressing Update
+fetches that branch into a worktree of the clone (`build/stable` or
+`build/nightly`), runs its `install.sh` with the original arguments and
+restarts the app. The worktree shares the clone's `.venv` and `work/`, so an
+update reuses the translation cache and engine build. Game data, saves and
+settings are kept; the output is in `Update.log` in the data folder. An engine
+checkout patched by another revision is restored to the pinned sources and
+repatched automatically.
 
 Fullscreen covers the whole display by default (**Around notch**), which
 measured about 7 ms less presentation latency than a macOS fullscreen Space

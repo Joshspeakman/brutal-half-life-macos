@@ -18,6 +18,26 @@ def checkout(url,revision,destination,recursive=False):
     if recursive:subprocess.run(['git','submodule','update','--init','--recursive'],cwd=destination,check=True)
 
 
+def apply_patches(engine,patches):
+    """Apply the project's engine patches exactly. A tree patched by another
+    revision of this project (an app update, a branch switch) is reset to the
+    pinned sources first: patches that edit each other's hunks cannot be
+    detected or applied one by one. Ignored build output is kept."""
+    def applied(patch):
+        return subprocess.run(['git','apply','--reverse','--check',str(patch)],cwd=engine,
+                              stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
+    if patches and all(applied(p) for p in patches):return
+    changed=subprocess.check_output(['git','status','--porcelain','--untracked-files=no'],cwd=engine,text=True).strip()
+    if changed:
+        print('Engine sources differ from this revision\'s patches; restoring the pinned sources',flush=True)
+        subprocess.run(['git','checkout','--','.'],cwd=engine,check=True)
+    for name in subprocess.check_output(['git','ls-files','--others','--exclude-standard','-z'],cwd=engine,text=True).split('\0'):
+        if name:(engine/name).unlink()       # files a previous patch set created
+    for patch in patches:
+        subprocess.run(['git','apply','--check',str(patch)],cwd=engine,check=True)
+        subprocess.run(['git','apply',str(patch)],cwd=engine,check=True)
+
+
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--build-engine',action='store_true')
@@ -26,11 +46,7 @@ def main():
     upstream=ROOT/'work/upstream';upstream.mkdir(parents=True,exist_ok=True)
     engine=upstream/'xash3d-fwgs'
     checkout('https://github.com/FWGS/xash3d-fwgs.git',ENGINE_REVISION,engine,recursive=True)
-    for patch in sorted((ROOT/'patches').glob('xash-*.patch')):
-        already=subprocess.run(['git','apply','--reverse','--check',str(patch)],cwd=engine,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
-        if not already:
-            subprocess.run(['git','apply','--check',str(patch)],cwd=engine,check=True)
-            subprocess.run(['git','apply',str(patch)],cwd=engine,check=True)
+    apply_patches(engine,sorted((ROOT/'patches').glob('xash-*.patch')))
     spec=PROFILE['modules']['vgui.dll'];sdk=upstream/'vgui-dev'
     checkout(spec['sdk_repository'],spec['sdk_revision'],sdk)
     payload=(sdk/spec['sdk_path']).read_bytes()
