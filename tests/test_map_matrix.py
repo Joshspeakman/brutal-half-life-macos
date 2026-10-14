@@ -25,7 +25,7 @@ def main():
     ap.add_argument('--renderer',choices=['gl','metal'],default='metal')
     args=ap.parse_args()
     session=args.session.resolve()
-    if not session.is_relative_to(ROOT/'work'):ap.error('Tests require a session inside work/')
+    if not session.is_relative_to((ROOT/'work').resolve()):ap.error('Tests require a session inside work/')
     mod=session/'bhl'
     available={p.stem:p for p in (mod/'maps').glob('*.bsp')}
     selected=args.maps or sorted(available)

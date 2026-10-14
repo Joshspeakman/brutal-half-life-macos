@@ -20,7 +20,7 @@ def main():
     ap.add_argument('--session',type=Path,required=True)
     ap.add_argument('--renderer',choices=['gl','metal'],default='metal')
     args=ap.parse_args();session=args.session.resolve()
-    if not session.is_relative_to(ROOT/'work'):ap.error('Tests require isolated work/ data')
+    if not session.is_relative_to((ROOT/'work').resolve()):ap.error('Tests require isolated work/ data')
     lock=(session/'.session.lock').open('a');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     driver=ROOT/'work/native/input-driver.dylib'
     flags=shlex.split(subprocess.check_output(['pkg-config','--cflags','sdl2'],text=True))

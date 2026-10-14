@@ -32,7 +32,7 @@ def main():
     ap.add_argument('--quit-after-frames',type=int,help='Finish a bounded map activation/capture run normally')
     args=ap.parse_args()
     session=args.session.resolve();reports=args.report_dir.resolve()
-    if not session.is_relative_to(ROOT/'work') or not reports.is_relative_to(ROOT/'work'):ap.error('Tests require isolated paths inside work/')
+    if not session.is_relative_to((ROOT/'work').resolve()) or not reports.is_relative_to((ROOT/'work').resolve()):ap.error('Tests require isolated paths inside work/')
     reports.mkdir(parents=True,exist_ok=True)
     session_lock=(session/'.session.lock').open('a')
     fcntl.flock(session_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)

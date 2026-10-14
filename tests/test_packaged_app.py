@@ -29,11 +29,11 @@ def main():
     app = args.app.resolve()
     with (app/'Contents/Info.plist').open('rb') as stream:
         data = Path(plistlib.load(stream)['BHLDataDirectory'])
-    if not data.is_relative_to(ROOT/'work'):
+    if not data.is_relative_to((ROOT/'work').resolve()):
         ap.error('Acceptance tests require isolated data inside ignored work/')
     executable = app/'Contents/MacOS/BrutalHalfLife'
     out = args.report_dir.resolve()
-    if not out.is_relative_to(ROOT/'work'):ap.error('Reports must remain inside ignored work/')
+    if not out.is_relative_to((ROOT/'work').resolve()):ap.error('Reports must remain inside ignored work/')
     out.mkdir(parents=True,exist_ok=True)
     image_probe = ROOT/'work/native/image-coverage'
     if 'menu' in args.stages:

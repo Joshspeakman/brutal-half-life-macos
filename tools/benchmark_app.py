@@ -73,7 +73,7 @@ def main():
     ap.add_argument('--name',required=True);ap.add_argument('--seconds',type=int,default=180)
     args=ap.parse_args()
     data=args.data.resolve();resources=args.app.resolve()/'Contents/Resources';runtime=resources/'Runtime'
-    if not data.is_relative_to(ROOT/'work'):ap.error('Use isolated data under work/')
+    if not data.is_relative_to((ROOT/'work').resolve()):ap.error('Use isolated data under work/')
     if not args.map.replace('_','').isalnum():ap.error('Invalid map name')
     if args.load and not args.load.replace('_','').isalnum():ap.error('Invalid save name')
     if not 10<=args.frames<=100000:ap.error('Use 10..100000 frames')

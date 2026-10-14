@@ -39,7 +39,7 @@ def main():
     if hashlib.sha256(args.archive.read_bytes()).hexdigest()!=ARCHIVE_SHA256:
         raise RuntimeError('Archive does not match the original BHL v3 release')
     out=args.session.resolve()
-    if not out.is_relative_to(ROOT/'work'):ap.error('Session must be inside ignored work/')
+    if not out.is_relative_to((ROOT/'work').resolve()):ap.error('Session must be inside ignored work/')
     out.mkdir(parents=True,exist_ok=True)
     session_lock=(out/'.session.lock').open('a')
     fcntl.flock(session_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
