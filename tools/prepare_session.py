@@ -96,7 +96,7 @@ gamemode "singleplayer_only"
             for name in ('libEGL.dylib', 'libGLESv2.dylib'):
                 stage_binary(ROOT/'work/angle'/name,out/name)
             stage_binary(ROOT/'work/bridge/client_arm64.dylib',out/'bhl/cl_dlls/client_arm64.dylib')
-    print(f'Isolated session prepared under {out.relative_to(ROOT)}; installed games and saves unchanged')
+    print(f'Isolated session prepared under {args.session}; installed games and saves unchanged')
 
 
 if __name__=='__main__':main()
