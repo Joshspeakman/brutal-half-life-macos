@@ -3,7 +3,7 @@ set -euo pipefail
 BHL_ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$BHL_ROOT"
 if [[ $# != 1 ]]; then
-    echo 'Usage: ./bootstrap.sh /path/to/bhl_v3.zip' >&2
+    echo 'Usage: ./bootstrap.sh /path/to/bhl_v3.zip (or the game-files folder install.sh keeps)' >&2
     exit 2
 fi
 xcode-select -p >/dev/null 2>&1 || { echo 'Install Xcode Command Line Tools first.' >&2; exit 1; }

@@ -9,6 +9,8 @@ BHL_CHECK=()
 BHL_BRANCH=main
 usage() {
     echo 'Usage: ./install.sh --archive /path/to/bhl_v3.zip --valve /path/to/Half-Life/valve [--app /path/to/Brutal Half-Life.app] [--data-dir /path/to/data] [--branch main|nightly] [--check]'
+    echo 'The first install keeps the originals a rebuild needs in <data>/game-files; later runs (and the app'"'"'s updates)'
+    echo 'can pass that folder as --archive, so the ZIP can be deleted after the first install.'
 }
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -27,13 +29,14 @@ while [[ $# -gt 0 ]]; do
         *) usage >&2; exit 2;;
     esac
 done
-[[ -f "$BHL_ARCHIVE" && -d "$BHL_VALVE" ]] || { usage >&2; exit 2; }
+[[ ( -f "$BHL_ARCHIVE" || -d "$BHL_ARCHIVE" ) && -d "$BHL_VALVE" ]] || { usage >&2; exit 2; }
 [[ "$BHL_BRANCH" == main || "$BHL_BRANCH" == nightly ]] || { echo '--branch must be main or nightly' >&2; exit 2; }
 # Resolve user inputs before changing directory; preserve spaces throughout.
 BHL_ARCHIVE="$(cd "$(dirname "$BHL_ARCHIVE")" && pwd)/$(basename "$BHL_ARCHIVE")"
 BHL_VALVE="$(cd "$BHL_VALVE" && pwd)"
 [[ "$BHL_APP" = /* ]] || BHL_APP="$PWD/$BHL_APP"
 [[ "$BHL_DATA" = /* ]] || BHL_DATA="$PWD/$BHL_DATA"
+BHL_KEPT="$BHL_DATA/game-files"                         # the originals a rebuild reads, kept beside the install
 cd "$BHL_PROJECT"
 ./bootstrap.sh "$BHL_ARCHIVE"
 .venv/bin/python tools/build_project.py --archive "$BHL_ARCHIVE" --valve "$BHL_VALVE" ${BHL_CHECK[@]+"${BHL_CHECK[@]}"}
@@ -66,11 +69,15 @@ if [ -e "\$W/.git" ]; then git -C "\$W" checkout -q -f --detach "origin/\$BRANCH
 else mkdir -p "\$REPO/build"; git -C "\$REPO" worktree add -q -f --detach "\$W" "origin/\$BRANCH"; fi
 echo "== \$BRANCH: \$(git -C "\$W" log -1 --format='%h %s')"
 for shared in .venv work; do [ -e "\$W/\$shared" ] || ln -s "\$REPO/\$shared" "\$W/\$shared"; done
-exec "\$W/install.sh" --archive $(q "$BHL_ARCHIVE") --valve $(q "$BHL_VALVE") --app $(q "$BHL_APP") --data-dir $(q "$BHL_DATA") --branch $BHL_BRANCH
+exec "\$W/install.sh" --archive $(q "$BHL_KEPT") --valve $(q "$BHL_VALVE") --app $(q "$BHL_APP") --data-dir $(q "$BHL_DATA") --branch $BHL_BRANCH
 UPDATE
     BHL_UPDATER=(--updater "$BHL_UPDATE_SCRIPT" --branch "$BHL_BRANCH")
 fi
 echo '== installing the app'
 .venv/bin/python tools/package_app.py --archive "$BHL_ARCHIVE" --valve "$BHL_VALVE" --app "$BHL_APP" --data-dir "$BHL_DATA" --replace ${BHL_UPDATER[@]+"${BHL_UPDATER[@]}"}
 [[ -n "${BHL_UPDATE_SCRIPT:-}" ]] && rm -f "$BHL_UPDATE_SCRIPT"
+if [[ -f "$BHL_ARCHIVE" ]]; then                        # after packaging: a new data folder is made from the whole ZIP
+    .venv/bin/python tools/originals.py keep "$BHL_ARCHIVE" "$BHL_KEPT"
+    echo "The original ZIP is no longer needed: updates rebuild from $BHL_KEPT"
+fi
 echo 'Local app built. Open it in Finder to play; no nightly build was published.'

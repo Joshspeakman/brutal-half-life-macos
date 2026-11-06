@@ -17,7 +17,7 @@ import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 from inputs import ROOT
-from prepare_session import ARCHIVE_SHA256
+from originals import ARCHIVE_SHA256, Originals
 
 
 def digest(path):
@@ -104,7 +104,7 @@ def bundle_runtime(target):
     return {name: digest(target/name) for name in sorted(originals)}
 
 
-def prepare_data(data, archive, valve):
+def prepare_data(data, source, valve):
     marker = data/'native-install.json'
     if data.exists():
         if not marker.is_file() or json.loads(marker.read_text()).get('archive_sha256') != ARCHIVE_SHA256:
@@ -117,8 +117,8 @@ def prepare_data(data, archive, valve):
             'SAVE', 'save', '*.sav', '*.log', 'config.cfg', 'video.cfg', 'screenshots', 'scrshots'))
         mod = staging/'bhl'
         mod.mkdir()
-        with zipfile.ZipFile(archive) as source:
-            for info in source.infolist():
+        with zipfile.ZipFile(source.archive('A new data folder')) as archive:
+            for info in archive.infolist():
                 p = PurePosixPath(info.filename.replace('\\', '/'))
                 if p.is_absolute() or '..' in p.parts or stat.S_ISLNK(info.external_attr >> 16):
                     raise RuntimeError(f'Unsafe archive entry: {info.filename}')
@@ -131,7 +131,7 @@ def prepare_data(data, archive, valve):
                     out.mkdir(parents=True, exist_ok=True)
                 else:
                     out.parent.mkdir(parents=True, exist_ok=True)
-                    with source.open(info) as src, out.open('wb') as dst:
+                    with archive.open(info) as src, out.open('wb') as dst:
                         shutil.copyfileobj(src, dst)
         (mod/'gameinfo.txt').write_text('''basedir "valve"
 gamedir "bhl"
@@ -161,8 +161,7 @@ def main():
     args = ap.parse_args()
     archive, valve = args.archive.expanduser().resolve(), args.valve.expanduser().resolve()
     app, data = args.app.expanduser().absolute(), args.data_dir.expanduser().resolve()
-    if digest(archive) != ARCHIVE_SHA256:
-        raise RuntimeError('Archive does not match the pinned BHL v3 release')
+    source = Originals(archive)                           # the ZIP, or the kept originals (install.sh)
     for relative in ('maps/c0a0.bsp', 'halflife.wad', 'models/v_9mmhandgun.mdl'):
         if not (valve/relative).is_file():
             raise RuntimeError(f'Missing Half-Life data: {relative}')
@@ -181,7 +180,7 @@ def main():
             raise RuntimeError('Refusing to replace an unrelated application')
         if Path(existing.get('BHLDataDirectory', '')).resolve() != data:
             raise RuntimeError('Use the existing app data directory when replacing it so saves remain available')
-    prepare_data(data, archive, valve)
+    prepare_data(data, source, valve)
     session_lock = (data/'.game.lock').open('a')
     fcntl.flock(session_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     app.parent.mkdir(parents=True, exist_ok=True)

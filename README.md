@@ -37,7 +37,7 @@ brew install pkg-config sdl2 upx
 Bootstrap creates the pinned Python environment and runs the small interface
 proof. The project builder verifies the archive, fetches pinned engine/SDK
 dependencies and pinned ARM64 ANGLE libraries, unpacks FMOD, relocates and translates all four modules, builds
-both bridges and stages an isolated session. First-time translation takes
+both bridges and, with `--check`, stages the isolated session the checks run in. First-time translation takes
 longer than incremental builds.
 
 All input copies, third-party checkouts, generated game code, binaries and
@@ -52,7 +52,13 @@ To build a local app, use the same owned inputs:
 
 The default app is `~/Applications/Brutal Half-Life.app`; separate game data,
 settings, saves and `Last Run.log` are under
-`~/Library/Application Support/Brutal Half-Life`. `--app` and `--data-dir`
+`~/Library/Application Support/Brutal Half-Life`. The first install keeps the
+few original files a rebuild reads (the mod's three game DLLs and its stock
+`config.cfg`, checked against the pinned release) in that folder's
+`game-files`, and the app's updates rebuild from there, so the ZIP can be
+deleted after the first install. Passing `--archive` that `game-files` folder
+works for any later `install.sh` or `build_project.py` run; only a new data
+folder or the development checks (`--check`) need the ZIP again. `--app` and `--data-dir`
 override these locations. Repeating the command replaces only this project's
 app and preserves its existing user data. `--check` runs the development checks.
 Each launch archives the previous play log under `Play Logs`. Logs include the

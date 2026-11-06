@@ -10,8 +10,7 @@ import stat
 import zipfile
 from pathlib import Path, PurePosixPath
 from inputs import ROOT
-
-ARCHIVE_SHA256='29759d1c91fbe00b42e56df2f277663ef89eab8a715542a4722884558bb80cac'
+from originals import ARCHIVE_SHA256, Originals
 
 
 def stage_binary(source, target):
@@ -36,16 +35,14 @@ def main():
     args=ap.parse_args()
     for name in ('maps/c0a0.bsp','halflife.wad','models/v_9mmhandgun.mdl'):
         if not (args.valve/name).is_file():raise RuntimeError(f'Missing Half-Life data: {name}')
-    if hashlib.sha256(args.archive.read_bytes()).hexdigest()!=ARCHIVE_SHA256:
-        raise RuntimeError('Archive does not match the original BHL v3 release')
+    source=Originals(args.archive)
     out=args.session.resolve()
     if not out.is_relative_to((ROOT/'work').resolve()):ap.error('Session must be inside ignored work/')
     out.mkdir(parents=True,exist_ok=True)
     session_lock=(out/'.session.lock').open('a')
     fcntl.flock(session_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     fixtures=ROOT/'work/fixtures';fixtures.mkdir(parents=True,exist_ok=True)
-    with zipfile.ZipFile(args.archive) as archive:
-        (fixtures/'bhl-config.cfg').write_bytes(archive.read('config.cfg'))
+    (fixtures/'bhl-config.cfg').write_bytes(source.read('config.cfg'))
     if not (out/'valve').exists():
         staging=out/'valve.new'
         if staging.exists():raise RuntimeError('An interrupted valve.new staging copy needs review')
@@ -53,7 +50,7 @@ def main():
         staging.rename(out/'valve')
     if not (out/'bhl').exists():
         staging=out/'bhl.new';staging.mkdir(exist_ok=False)
-        with zipfile.ZipFile(args.archive) as archive:
+        with zipfile.ZipFile(source.archive('A development session')) as archive:
             for info in archive.infolist():
                 parts=PurePosixPath(info.filename.replace('\\','/'))
                 if parts.is_absolute() or '..' in parts.parts or stat.S_ISLNK(info.external_attr>>16):

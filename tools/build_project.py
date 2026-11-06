@@ -64,7 +64,7 @@ def main():
     run('runtime','tools/build_runtime.py',*MODULES)
     run('server-bridge','tools/build_bridge.py')
     run('client-bridge','tools/build_client_bridge.py')
-    if args.valve:
+    if args.valve and (args.check or args.check_client):    # the isolated session is what the checks run in
         run('session','tools/prepare_session.py','--archive',archive,'--valve',args.valve.expanduser().resolve(),'--client')
     if args.check:
         run('interfaces-build','tools/build_probe.py')

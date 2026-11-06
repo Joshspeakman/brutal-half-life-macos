@@ -1,9 +1,9 @@
-"""Extract only verified modules from the user's original v3 ZIP."""
+"""Extract only verified modules from the user's original v3 ZIP (or the originals install.sh keeps)."""
 import argparse
 import hashlib
 import json
-import zipfile
 from inputs import ROOT, PROFILE
+from originals import Originals
 
 
 def main():
@@ -11,16 +11,16 @@ def main():
     ap.add_argument("archive")
     args = ap.parse_args()
     # Validate all payloads before writing any of them.
-    with zipfile.ZipFile(args.archive) as archive:
-        payloads = {}
-        for name, spec in PROFILE["modules"].items():
-            if "member" not in spec:
-                continue
-            payload = archive.read(spec["member"])
-            actual = hashlib.sha256(payload).hexdigest()
-            if actual != spec["sha256"]:
-                raise SystemExit(f"{name}: unsupported input SHA256 {actual}; expected {spec['sha256']}")
-            payloads[name] = payload
+    source = Originals(args.archive)
+    payloads = {}
+    for name, spec in PROFILE["modules"].items():
+        if "member" not in spec:
+            continue
+        payload = source.read(spec["member"])
+        actual = hashlib.sha256(payload).hexdigest()
+        if actual != spec["sha256"]:
+            raise SystemExit(f"{name}: unsupported input SHA256 {actual}; expected {spec['sha256']}")
+        payloads[name] = payload
     out = ROOT / "work/inputs"
     out.mkdir(parents=True, exist_ok=True)
     for name, payload in payloads.items():
