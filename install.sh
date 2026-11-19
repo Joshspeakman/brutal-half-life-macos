@@ -57,6 +57,9 @@ if [[ -n "$BHL_REPO" ]] && git -C "$BHL_REPO" remote get-url origin >/dev/null 2
 set -euo pipefail
 REPO=$(q "$BHL_REPO"); BRANCH=$BHL_BRANCH; W="\$REPO/build/$BHL_WORK"
 export GIT_TERMINAL_PROMPT=0                              # never wait for a password prompt
+# a private repository: the token of its owner's gh login (git's gh credential helper reads GH_TOKEN), whichever gh account is active
+OWNER="\$(git -C "\$REPO" remote get-url origin | sed -E 's#.*github.com[:/]([^/]+)/.*#\1#')"
+[ -n "\${GH_TOKEN:-}" ] || GH_TOKEN="\$(PATH="/opt/homebrew/bin:/usr/local/bin:\$PATH" gh auth token --user "\$OWNER" 2>/dev/null || true)"; [ -z "\$GH_TOKEN" ] || export GH_TOKEN
 if [ "\${1:-}" = --check ]; then                          # GitHub's newest, unless this app already has it: a build
   R="\$(git -C "\$REPO" ls-remote origin "refs/heads/\$BRANCH" | cut -f1)"   # from a newer local commit is never offered an older one
   if [ -n "\$R" ] && git -C "\$REPO" merge-base --is-ancestor "\$R" $BHL_BUILT 2>/dev/null; then echo $BHL_BUILT; else echo "\$R"; fi
