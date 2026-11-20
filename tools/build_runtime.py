@@ -17,6 +17,9 @@ def main():
     ap.add_argument("--opt", choices=["0", "1", "2"], default="2")
     ap.add_argument("--lto", action=argparse.BooleanOptionalAction, default=True,
                     help="Enable ThinLTO across translated modules (default; --no-lto disables it)")
+    ap.add_argument("--split", action="store_true",
+                    help="The runtime (libbhl.dylib) and the translated modules (libgame.dylib) as two libraries, for the "
+                         "drag-and-drop app: its runtime is built here, the game's library on the player's Mac")
     args = ap.parse_args()
     out = ROOT / "work/native"
     out.mkdir(parents=True, exist_ok=True)
@@ -64,9 +67,10 @@ def main():
     sources += [ROOT / "runtime/rt.c", ROOT / "runtime/memory_watch.c", ROOT / "runtime/win32.c", ROOT / "runtime/loader.c", ROOT / "runtime/platform.c", ROOT / "runtime/directsound.c", ROOT / "runtime/threading.c", ROOT / "runtime/gdi.c", ROOT / "tests/abi_layout.c", out / "tables.c", out / "modules.c"]
     sdl_cflags=shlex.split(subprocess.check_output(['pkg-config','--cflags','sdl2'],text=True))
     sdl_libs=shlex.split(subprocess.check_output(['pkg-config','--libs','sdl2'],text=True))
-    flags = ["clang", "-arch", "arm64", "-std=gnu11", f"-O{args.opt}", "-g",
+    target = os.environ.get("MACOSX_DEPLOYMENT_TARGET")     # in the flags, so objects built for another macOS are rebuilt
+    flags = ["clang", "-arch", "arm64", *([f"-mmacosx-version-min={target}"] if target else []), "-std=gnu11", f"-O{args.opt}", "-g",
              "-DRT_MEMORY_WATCH", "-ffp-contract=off", "-fno-strict-aliasing", "-Wno-unused-value",
-             "-I", str(ROOT / "runtime"), "-I", str(out)]
+             "-I", str(ROOT / "runtime"), "-I", str(out)] + (["-DRT_SPLIT"] if args.split else [])
     if args.lto:flags += ['-flto=thin']
     headers = b''.join(p.read_bytes() for p in sorted((ROOT / "runtime").glob("*.h")))
     compiler = subprocess.check_output(["clang", "--version"])
@@ -86,12 +90,22 @@ def main():
     with ThreadPoolExecutor(max_workers=min(4, os.cpu_count() or 1)) as pool:
         objects = list(pool.map(compile_one, sources))
     staged = out / "libbhl.new.dylib"
-    subprocess.run(["clang", "-arch", "arm64", "-dynamiclib", *(['-flto=thin'] if args.lto else []), *map(str, objects), *sdl_libs, "-liconv", "-framework", "CoreFoundation", "-framework", "CoreText", "-framework", "CoreGraphics",
+    split = []
+    if args.split:   # the game: lifted code and its tables, resolving the runtime's symbols when loaded (weakly linked below)
+        is_game = lambda s: s.parent.parent == ROOT / "work/lifted" or s.parent == out   # lift_*.c, tables.c, modules.c
+        game = [o for o, s in zip(objects, sources) if is_game(s)]
+        objects = [o for o, s in zip(objects, sources) if not is_game(s)]
+        lib = out / "libgame.new.dylib"
+        subprocess.run(["clang", "-arch", "arm64", "-dynamiclib", *(['-flto=thin'] if args.lto else []), *map(str, game),
+                        "-undefined", "dynamic_lookup", "-install_name", "@rpath/libgame.dylib", "-o", str(lib)], check=True)
+        lib.replace(out / "libgame.dylib")
+        split = ["-Wl,-weak_library," + str(out / "libgame.dylib"), "-Wl,-rpath,@loader_path"]
+    subprocess.run(["clang", "-arch", "arm64", "-dynamiclib", *(['-flto=thin'] if args.lto else []), *map(str, objects), *split, *sdl_libs, "-liconv", "-framework", "CoreFoundation", "-framework", "CoreText", "-framework", "CoreGraphics",
                     "-install_name", "@rpath/libbhl.dylib", "-o", str(staged)], check=True)
     subprocess.run(["codesign", "--force", "--sign", "-", str(staged)], check=True)
     staged.replace(out / "libbhl.dylib")
     (out / "build.json").write_text(json.dumps(dict(modules=args.modules, functions=len(functions),
-        imports=len(imports), architecture="arm64", optimization=args.opt, thin_lto=args.lto, gameplay_tested=False), indent=2) + "\n")
+        imports=len(imports), architecture="arm64", optimization=args.opt, thin_lto=args.lto, split=args.split, gameplay_tested=False), indent=2) + "\n")
     print(f"Linked {len(functions)} functions and {len(imports)} imports; gameplay validation pending")
 
 

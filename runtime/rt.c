@@ -17,7 +17,11 @@ struct rt_fn { uint32_t addr; GuestFn fn; };
 static inline uint32_t rt_mix(uint32_t h) { h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15; h *= 0x846ca68bu; h ^= h >> 16; return h; }
 
 extern const struct rt_fn rt_fntab[];
+#ifdef RT_SPLIT                                 /* the game's code in its own library, built from the player's copy (tools/build_runtime.py --split) */
+extern const unsigned rt_fntab_n __attribute__((weak));
+#else
 extern const unsigned rt_fntab_n;
+#endif
 struct rt_imp { uint32_t iat; const char *name; };
 extern const struct rt_imp rt_imptab[];
 extern const unsigned rt_imptab_n;
@@ -66,6 +70,9 @@ GuestFn rt_lookup(uint32_t addr)
 struct rt_fn *rt_fn_hash; uint32_t rt_fn_mask;
 __attribute__((constructor)) static void rt_prepare_fn_hash(void)
 {
+#ifdef RT_SPLIT
+    if (!&rt_fntab_n) return;                    /* no game library yet */
+#endif
     uint32_t n = 1;
     while (n < rt_fntab_n * 2u) n <<= 1;
     struct rt_fn *h = calloc(n, sizeof *h);

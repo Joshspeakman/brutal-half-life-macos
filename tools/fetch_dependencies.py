@@ -1,4 +1,5 @@
 """Fetch pinned engine/SDK dependencies into ignored work/, never system game folders."""
+import os
 import argparse
 import hashlib
 import json
@@ -38,6 +39,14 @@ def apply_patches(engine,patches):
         subprocess.run(['git','apply',str(patch)],cwd=engine,check=True)
 
 
+def stale_lock(engine):
+    """waf reads its directories back from its lock file before configuring: one written through another path to this
+    checkout (a symlinked ~/Projects) makes every later build do nothing. Configure writes it again."""
+    for lock in engine.glob('.lock-waf_*'):lock.unlink()
+    deps=os.environ.get('BHL_DEPS')            # libraries built for the app's macOS (tools/build_deps.sh): theirs, not Homebrew's
+    if deps:os.environ['PKG_CONFIG_LIBDIR']=os.path.join(deps,'lib','pkgconfig')
+
+
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--build-engine',action='store_true')
@@ -60,11 +69,13 @@ def main():
     if missing:raise RuntimeError(f'VGUI is missing {len(missing)} required client exports')
     (ROOT/'work/reports/dependencies.json').write_text(json.dumps(dict(engine_revision=ENGINE_REVISION,vgui_revision=spec['sdk_revision'],vgui_sha256=spec['sha256'],vgui_imports_resolved=len(imports)),indent=2)+'\n')
     if args.build_engine:
+        stale_lock(engine)
         subprocess.run(['./waf','configure','--out=build','--dedicated','--disable-werror','--64bits','--prefix='+str(ROOT/'work/engine-dedicated')],cwd=engine,check=True)
         subprocess.run(['./waf','build','-j4'],cwd=engine,check=True)
     if args.build_client_engine:
         from fetch_angle import fetch
         fetch()
+        stale_lock(engine)
         subprocess.run(['./waf','configure','--out=build-client','--disable-werror','--64bits','--enable-soft','--enable-null','--enable-gles3compat','--sdl-use-pkgconfig','--prefix='+str(ROOT/'work/engine-client')],cwd=engine,check=True)
         subprocess.run(['./waf','build','-j4'],cwd=engine,check=True)
     print(f'Pinned dependencies ready; verified all {len(imports)} client VGUI imports')
