@@ -9,6 +9,9 @@ struct Installation {
     let resources: URL
     let data: URL
     var runtime: URL { resources.appendingPathComponent("Runtime") }
+    /// The drag-and-drop app: the game's library and images, set up on this Mac (tools/dropin_build.py), else nil
+    var gameLib: URL? { ProcessInfo.processInfo.environment["BHL_GAME_LIB"].map { URL(fileURLWithPath: $0) } }
+    var images: URL { gameLib?.appendingPathComponent("Images") ?? resources.appendingPathComponent("Images") }
     var mod: URL { data.appendingPathComponent("bhl") }
     var saves: URL { mod.appendingPathComponent("save") }
     var log: URL { data.appendingPathComponent("Last Run.log") }
@@ -39,7 +42,7 @@ struct Installation {
         for url in [runtime.appendingPathComponent("libxash.dylib"), runtime.appendingPathComponent("client_arm64.dylib"),
                     runtime.appendingPathComponent("libref_metal.dylib"), runtime.appendingPathComponent("libEGL.dylib"),
                     runtime.appendingPathComponent("libGLESv2.dylib"),
-                    runtime.appendingPathComponent("hl_arm64.dylib"), resources.appendingPathComponent("Images/hl.dll"),
+                    runtime.appendingPathComponent("hl_arm64.dylib"), images.appendingPathComponent("hl.dll"),
                     data.appendingPathComponent("native-install.json"), data.appendingPathComponent("valve/halflife.wad"),
                     mod.appendingPathComponent("maps/start.bsp")] {
             guard FileManager.default.fileExists(atPath: url.path) else { throw failure("Missing \(url.lastPathComponent). Rebuild this app with your Half-Life files and the BHL v3 archive.") }
@@ -61,10 +64,10 @@ struct Installation {
         let p = Process(); p.executableURL = Bundle.main.executableURL; p.currentDirectoryURL = data
         var env = ProcessInfo.processInfo.environment
         for key in env.keys where key.hasPrefix("BHL_") || key.hasPrefix("SDL_") || key.hasPrefix("DYLD_") || key.hasPrefix("XASH3D_") { env.removeValue(forKey: key) }
-        env["BHL_IMAGE_DIR"] = resources.appendingPathComponent("Images").path
+        env["BHL_IMAGE_DIR"] = images.path
         env["XASH3D_BASEDIR"] = data.path
         env["XASH3D_EXTRAS_PAK1"] = resources.appendingPathComponent("extras.pk3").path
-        env["DYLD_LIBRARY_PATH"] = runtime.path
+        env["DYLD_LIBRARY_PATH"] = gameLib.map { runtime.path + ":" + $0.path } ?? runtime.path   /* (the downloaded app: + the game's library) */
         env["SDL_EGL_LIBRARY"] = runtime.appendingPathComponent("libEGL.dylib").path
         env["SDL_OPENGL_LIBRARY"] = runtime.appendingPathComponent("libGLESv2.dylib").path
         env["ANGLE_DEFAULT_PLATFORM"] = "metal"
@@ -341,5 +344,17 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 }
 if CommandLine.arguments.dropFirst().first == "--run-engine" { runBundledEngine() }
+/* The drag-and-drop app (tools/make_dropin.sh): its setup window (recomp setup's setup_ui.m, linked in) builds the game from the
+ * player's copy first, then says where it is; this process never loads the game (game.json's bound_symbol is ""). */
+@_silgen_name("ds_easy_install") func ds_easy_install(_ exe: UnsafeMutablePointer<UnsafePointer<CChar>?>, _ game: UnsafeMutablePointer<UnsafePointer<CChar>?>,
+                                                      _ data: UnsafeMutablePointer<UnsafePointer<CChar>?>) -> Int32
+if let res = Bundle.main.resourceURL, FileManager.default.fileExists(atPath: res.appendingPathComponent("setup/game.json").path),
+   ProcessInfo.processInfo.environment["BHL_DATA_DIR"] == nil, !CommandLine.arguments.dropFirst().contains(where: { $0.hasPrefix("--") }) {   // (a plain launch: not --write-iconset or a test)
+    var exe: UnsafePointer<CChar>? = nil, game: UnsafePointer<CChar>? = nil, data: UnsafePointer<CChar>? = nil
+    if ds_easy_install(&exe, &game, &data) > 0, let exe, let data {
+        setenv("BHL_DATA_DIR", data, 1)
+        setenv("BHL_GAME_LIB", (String(cString: exe) as NSString).deletingLastPathComponent, 1)
+    }
+}
 let app = NSApplication.shared
 let delegate = Launcher(); app.delegate = delegate; app.run()

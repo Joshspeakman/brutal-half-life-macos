@@ -33,7 +33,9 @@ struct Updater {
         DispatchQueue.global().asyncAfter(deadline: .now() + 20) { if task.isRunning { task.terminate() } }
         let data = pipe.fileHandleForReading.readDataToEndOfFile(); task.waitUntilExit()
         let out = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return task.terminationStatus == 0 && out.count >= 40 ? String(out.prefix(40)) : nil
+        if task.terminationStatus != 0 || out.isEmpty { return nil }
+        if out.count >= 40 { return String(out.prefix(40)) }                       // a commit (an app built from a checkout)
+        return out.contains(where: { $0.isWhitespace }) ? nil : out                 // a release's tag (the downloaded app)
     }
 
     func choice(_ state: UpdateState, latest: String?) -> LaunchRow.Choice {
@@ -49,6 +51,12 @@ struct Updater {
 
     /// The phase of the updater's output, in words.
     static func phase(_ line: String, branch: String) -> String? {
+        if branch == "release" {                                                    // the downloaded app's updater (recomp setup's update.sh)
+            if line.hasPrefix("== downloading ") { return "Downloading " + line.dropFirst(15) + " from GitHub" }
+            if line.hasPrefix("== unpacking") { return "Unpacking it" }
+            if line.hasPrefix("== installing") { return "Installing the new app" }
+            return nil
+        }
         if line.hasPrefix("== fetching") { return "Downloading the update from GitHub" }
         if line.hasPrefix("== \(branch): ") { return "Got " + line.dropFirst(branch.count + 5) }
         if line.hasPrefix("prepare:") || line.hasPrefix("dependencies:") || line.hasPrefix("unpack:") || line.hasPrefix("relocate:") {

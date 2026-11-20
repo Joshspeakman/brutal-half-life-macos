@@ -33,7 +33,10 @@ def dependencies(path):
             for line in run('otool', '-L', path).splitlines()[1:]]
 
 
-def bundle_runtime(target):
+def bundle_runtime(target, native=None, bridge=None, external=(), extra=None):
+    """native, bridge: another runtime build and its bridges (tools/make_dropin.sh: the split runtime for macOS 14);
+    external: libraries left out and to their @rpath name (the drag-and-drop app's libgame.dylib, built on the player's Mac
+    and found through DYLD_LIBRARY_PATH)."""
     full = ROOT/'work/upstream/xash3d-fwgs/build-client'
     inputs = {name: full/source for name, source in {
         'xash3d': 'game_launch/xash3d', 'libxash.dylib': 'engine/libxash.dylib',
@@ -43,12 +46,13 @@ def bundle_runtime(target):
         'filesystem_stdio.dylib': 'filesystem/filesystem_stdio.dylib',
     }.items()}
     inputs.update({
-        'hl_arm64.dylib': ROOT/'work/bridge/hl_arm64.dylib',
-        'client_arm64.dylib': ROOT/'work/bridge/client_arm64.dylib',
-        'libbhl.dylib': ROOT/'work/native/libbhl.dylib',
+        'hl_arm64.dylib': (bridge or ROOT/'work/bridge')/'hl_arm64.dylib',
+        'client_arm64.dylib': (bridge or ROOT/'work/bridge')/'client_arm64.dylib',
+        'libbhl.dylib': (native or ROOT/'work/native')/'libbhl.dylib',
         'libEGL.dylib': ROOT/'work/angle/libEGL.dylib',
         'libGLESv2.dylib': ROOT/'work/angle/libGLESv2.dylib',
     })
+    inputs.update(extra or {})   # libraries the engine links by @rpath name (tools/build_deps.sh's, for the drag-and-drop app)
     # sdl2-compat loads SDL3 dynamically, so it is absent from otool -L.
     sdl = Path(run('pkg-config', '--variable=libdir', 'sdl2').strip())/'libSDL2.dylib'
     if 'libSDL3.dylib' in run('strings', sdl):
@@ -71,7 +75,7 @@ def bundle_runtime(target):
             if dependency.startswith(('/System/', '/usr/lib/')):
                 continue
             if dependency.startswith('@'):
-                if Path(dependency).name not in inputs:
+                if Path(dependency).name not in inputs and Path(dependency).name not in external:
                     raise RuntimeError(f'Unresolved dependency: {dependency}')
                 continue
             dep = Path(dependency)
@@ -89,6 +93,8 @@ def bundle_runtime(target):
             if dependency in own_id or dependency.startswith(('/System/', '/usr/lib/')):
                 continue
             depname = Path(dependency).name
+            if depname in external:
+                continue
             if depname not in originals:
                 raise RuntimeError(f'Missing bundled library: {dependency}')
             edits += ['-change', dependency, '@loader_path/'+depname]
@@ -99,7 +105,7 @@ def bundle_runtime(target):
         if 'arm64' not in run('lipo', '-archs', binary).split():
             raise RuntimeError(f'Not an ARM64 binary: {name}')
         for dep in dependencies(binary):
-            if not dep.startswith(('/System/', '/usr/lib/', '@loader_path/')):
+            if not dep.startswith(('/System/', '/usr/lib/', '@loader_path/')) and Path(dep).name not in external:
                 raise RuntimeError(f'Nonportable dependency: {dep}')
     return {name: digest(target/name) for name in sorted(originals)}
 

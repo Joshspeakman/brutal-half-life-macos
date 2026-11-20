@@ -3,6 +3,10 @@ import subprocess
 import hashlib
 import json
 from inputs import ROOT
+import os
+from pathlib import Path
+# BHL_NATIVE_DIR / BHL_BRIDGE_DIR: another runtime build and output (tools/make_dropin.sh: the split runtime for macOS 14)
+NATIVE=Path(os.environ.get('BHL_NATIVE_DIR', ROOT/'work/native')); BRIDGE=Path(os.environ.get('BHL_BRIDGE_DIR', ROOT/'work/bridge'))
 from generate_bridge import main as generate
 
 
@@ -11,19 +15,19 @@ def split_game():
     """A split build (tools/build_runtime.py --split): the module tables the bridge reads are in the game's library, which is
     linked weakly (the drag-and-drop app's is built on the player's Mac)."""
     import json as _json
-    native = ROOT / 'work/native'
+    native = NATIVE
     built = _json.loads((native / 'build.json').read_text()) if (native / 'build.json').exists() else {}
     return ['-Wl,-weak_library,' + str(native / 'libgame.dylib')] if built.get('split') else []
 
 def main():
     generate()
     upstream=ROOT/'work/upstream/xash3d-fwgs'
-    out=ROOT/'work/bridge'
-    includes=[ROOT/'runtime',out]+[upstream/p for p in ['common','engine','public','pm_shared','3rdparty/library_suffix/include']]
+    out=BRIDGE
+    includes=[ROOT/'runtime',out,ROOT/'work/bridge']+[upstream/p for p in ['common','engine','public','pm_shared','3rdparty/library_suffix/include']]
     command=['clang','-arch','arm64','-std=gnu11','-O2','-g','-dynamiclib','-Wno-c2x-extensions']
     for path in includes:command+=['-I',str(path)]
     staged=out/'hl_arm64.new.dylib'
-    command += [str(ROOT/'runtime/server_bridge.c'),'-L',str(ROOT/'work/native'),'-lbhl', *split_game(),
+    command += [str(ROOT/'runtime/server_bridge.c'),'-L',str(NATIVE),'-lbhl', *split_game(),
                 '-Wl,-rpath,@loader_path','-Wl,-rpath,@loader_path/../native','-o',str(staged)]
     subprocess.run(command,check=True)
     subprocess.run(['codesign','--force','--sign','-',str(staged)],check=True)

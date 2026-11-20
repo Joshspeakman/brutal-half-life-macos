@@ -14,9 +14,13 @@ func body(_ size: CGFloat, bold: Bool = false) -> NSFont {
 
 /// The launch window's art (tools/bhl_art.py at install time): the mod's own main-menu background.
 func launcherArt(_ name: String) -> NSImage? {
-    guard let dir = Bundle.main.resourceURL?.appendingPathComponent("art") else { return nil }
-    for ext in ["png", "jpg"] {
-        if let image = NSImage(contentsOf: dir.appendingPathComponent("\(name).\(ext)")), image.size.width > 16 { return image }
+    // the app's own, else the drag-and-drop app's, made by its setup in the data folder (tools/bhl_art.py)
+    let dirs = [Bundle.main.resourceURL?.appendingPathComponent("art"),
+                ProcessInfo.processInfo.environment["BHL_DATA_DIR"].map { URL(fileURLWithPath: $0).appendingPathComponent("art") }].compactMap { $0 }
+    for dir in dirs {
+        for ext in ["png", "jpg"] {
+            if let image = NSImage(contentsOf: dir.appendingPathComponent("\(name).\(ext)")), image.size.width > 16 { return image }
+        }
     }
     return nil
 }

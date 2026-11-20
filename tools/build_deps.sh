@@ -9,6 +9,7 @@ set -euo pipefail
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
 P="${1:-$HOME/ProjectBuilds/_toolkit/bhl-deps-$MACOSX_DEPLOYMENT_TARGET}"; SRC="$HOME/ProjectBuilds/_toolkit/src"; mkdir -p "$SRC"
 [ -f "$P/.done" ] && { echo "$P"; exit 0; }
+UPX_SHA=a7d457be4ef942e46844ee8f301206b111394cbcbde3599747a6904c54ff116b
 W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
 fetch() {   # fetch <name> <url> <sha256 or ->: the tarball, checked; unpacked into $W/<name>
   local f="$SRC/$1.tar.gz"
@@ -30,5 +31,14 @@ fetch libogg https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.gz 0eb4b4b
 build libogg -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DBUILD_SHARED_LIBS=ON -DINSTALL_DOCS=OFF -DBUILD_TESTING=OFF
 fetch libvorbis https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.gz 0e982409a9c3fc82ee06e08205b1355e5c6aa4c36bca58146ef399621b0ce5ab
 build libvorbis -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DBUILD_SHARED_LIBS=ON
+# UPX (GPL-2.0 with its exception; run as a separate tool): setup unpacks the mod's FMOD DLL with it (tools/unpack_audio.py
+# checks the result's hash, so the version is the one that hash was taken with)
+f="$SRC/upx-5.2.1-src.tar.xz"
+[ -f "$f" ] || { curl -fsSL -o "$f.part" https://github.com/upx/upx/releases/download/v5.2.1/upx-5.2.1-src.tar.xz && mv "$f.part" "$f"; }
+got="$(shasum -a 256 "$f" | cut -d' ' -f1)"; [ "$UPX_SHA" = - ] && echo "build_deps: upx sha256 $got (pin it)" || [ "$got" = "$UPX_SHA" ] || { echo "build_deps: upx's tarball isn't the pinned one ($got)"; rm -f "$f"; exit 1; }
+mkdir -p "$W/upx"; tar -xJf "$f" -C "$W/upx" --strip-components 1
+cmake -S "$W/upx" -B "$W/upx/build" "${CM[@]}" -DUPX_CONFIG_DISABLE_GITREV=ON -DUPX_CONFIG_DISABLE_SELF_PACK_TEST=ON > "$W/upx.log" 2>&1 &&
+  cmake --build "$W/upx/build" --target upx >> "$W/upx.log" 2>&1 && mkdir -p "$P/bin" && cp "$W/upx/build/upx" "$P/bin/upx" || { tail -30 "$W/upx.log"; exit 1; }
+echo "built upx"
 ln -sf sdl2-compat.pc "$P/lib/pkgconfig/sdl2.pc"   # (the name the engine's configure and build_runtime.py ask pkg-config for)
 touch "$P/.done"; echo "$P"

@@ -4,6 +4,10 @@ import json
 import subprocess
 import shlex
 from inputs import ROOT
+import os
+from pathlib import Path
+# BHL_NATIVE_DIR / BHL_BRIDGE_DIR: another runtime build and output (tools/make_dropin.sh: the split runtime for macOS 14)
+NATIVE=Path(os.environ.get('BHL_NATIVE_DIR', ROOT/'work/native')); BRIDGE=Path(os.environ.get('BHL_BRIDGE_DIR', ROOT/'work/bridge'))
 from generate_bridge import main as generate_server
 from generate_client_bridge import main as generate_client
 
@@ -13,7 +17,7 @@ def split_game():
     """A split build (tools/build_runtime.py --split): the module tables the bridge reads are in the game's library, which is
     linked weakly (the drag-and-drop app's is built on the player's Mac)."""
     import json as _json
-    native = ROOT / 'work/native'
+    native = NATIVE
     built = _json.loads((native / 'build.json').read_text()) if (native / 'build.json').exists() else {}
     return ['-Wl,-weak_library,' + str(native / 'libgame.dylib')] if built.get('split') else []
 
@@ -21,14 +25,14 @@ def main():
     generate_server()
     generate_client()
     engine = ROOT/'work/upstream/xash3d-fwgs'
-    out = ROOT/'work/bridge'
-    includes = [ROOT/'runtime',out]+[engine/p for p in ['common','engine','public','pm_shared','3rdparty/library_suffix/include']]
+    out=BRIDGE
+    includes=[ROOT/'runtime',out,ROOT/'work/bridge']+[engine/p for p in ['common','engine','public','pm_shared','3rdparty/library_suffix/include']]
     command = ['clang','-arch','arm64','-std=gnu11','-O2','-g','-dynamiclib','-Wno-c2x-extensions']
     command += shlex.split(subprocess.check_output(['pkg-config','--cflags','sdl2'],text=True))
     for path in includes: command += ['-I',str(path)]
     staged = out/'client_arm64.new.dylib'
     command += shlex.split(subprocess.check_output(['pkg-config','--libs','sdl2'],text=True))
-    command += [str(ROOT/'runtime/client_bridge.c'),str(ROOT/'runtime/vgui_bridge.c'),'-L',str(ROOT/'work/native'),'-lbhl', *split_game(),
+    command += [str(ROOT/'runtime/client_bridge.c'),str(ROOT/'runtime/vgui_bridge.c'),'-L',str(NATIVE),'-lbhl', *split_game(),
                 '-Wl,-rpath,@loader_path','-Wl,-rpath,@loader_path/../native','-Wl,-rpath,@loader_path/../dlls','-o',str(staged)]
     subprocess.run(command,check=True)
     subprocess.run(['codesign','--force','--sign','-',str(staged)],check=True)
