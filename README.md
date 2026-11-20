@@ -1,5 +1,7 @@
 # Brutal Half-Life v3 native recompilation
 
+![Brutal Half-Life, native on Apple Silicon](media/hero.jpg)
+
 Local development of an Apple Silicon port using the original v3 modules.
 **The complete conversion is still under validation.** A local Mac app now
 launches the original client and server, renders the campaign hub and showcase,
@@ -19,6 +21,14 @@ ANGLE submits the resulting shaders and draws to Metal. Startup verifies an
 actual Metal device and rejects an OpenGL fallback. This is a Metal backend
 through a compatibility layer, not a renderer rewritten entirely in Metal.
 The original OpenGL path remains available for development comparisons.
+
+## Screenshots
+
+| | |
+|---|---|
+| ![The launch window](media/screenshots/screenshot-launcher.png) | ![Office complex](media/screenshots/screenshot-01-office-complex.jpg) |
+| ![Apprehension](media/screenshots/screenshot-02-apprehension.jpg) | ![Xen islands](media/screenshots/screenshot-03-xen-islands.jpg) |
+| ![Xen lair](media/screenshots/screenshot-04-xen-lair.jpg) | ![Gonarch](media/screenshots/screenshot-05-gonarch.jpg) |
 
 ## Reproduce the development build
 
