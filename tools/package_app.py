@@ -33,11 +33,11 @@ def dependencies(path):
             for line in run('otool', '-L', path).splitlines()[1:]]
 
 
-def bundle_runtime(target, native=None, bridge=None, external=(), extra=None):
+def bundle_runtime(target, native=None, bridge=None, external=(), extra=None, engine=None):
     """native, bridge: another runtime build and its bridges (tools/make_dropin.sh: the split runtime for macOS 14);
     external: libraries left out and to their @rpath name (the drag-and-drop app's libgame.dylib, built on the player's Mac
     and found through DYLD_LIBRARY_PATH)."""
-    full = ROOT/'work/upstream/xash3d-fwgs/build-client'
+    full = engine or ROOT/'work/upstream/xash3d-fwgs/build-client'
     inputs = {name: full/source for name, source in {
         'xash3d': 'game_launch/xash3d', 'libxash.dylib': 'engine/libxash.dylib',
         'libmenu.dylib': '3rdparty/mainui/libmenu.dylib',

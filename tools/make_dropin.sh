@@ -19,7 +19,7 @@ PY="$ROOT/.venv/bin/python3"; [ -x "$PY" ] || PY=python3
 TK="$HOME/ProjectBuilds/_toolkit/toolkit.tar.xz"; [ -f "$TK" ] || "$S/make_toolkit.sh" "$TK"
 DEPS="$(tools/build_deps.sh | tail -1)"; export BHL_DEPS="$DEPS" PKG_CONFIG_LIBDIR="$DEPS/lib/pkgconfig"
 echo "== the engine for macOS $MACOSX_DEPLOYMENT_TARGET"
-"$PY" tools/fetch_dependencies.py --build-client-engine > "$REL/engine.log" 2>&1 || { tail -20 "$REL/engine.log"; exit 1; }
+BHL_ENGINE_OUT=build-dropin "$PY" tools/fetch_dependencies.py --build-client-engine > "$REL/engine.log" 2>&1 || { tail -20 "$REL/engine.log"; exit 1; }
 echo "== the split runtime and the bridges"
 N="$ROOT/work/native-dropin"; B="$ROOT/work/bridge-dropin"; mkdir -p "$N" "$B"
 "$PY" tools/build_runtime.py hl.dll client.dll fmod.dll vgui.dll --split --out "$N" > "$REL/runtime.log" 2>&1 || { tail -20 "$REL/runtime.log"; exit 1; }
@@ -30,16 +30,17 @@ A="$REL/$NAME.app"; rm -rf "${A:?}"; mkdir -p "$A/Contents/MacOS" "$A/Contents/R
 "$PY" -c 'import sys; sys.path.insert(0, "tools"); from pathlib import Path; import package_app as p
 deps = Path(sys.argv[4]) / "lib"
 extra = {n: deps / n for n in ("libSDL2-2.0.0.dylib", "libSDL3.0.dylib", "libogg.0.dylib", "libvorbis.0.4.9.dylib", "libvorbisfile.3.3.8.dylib")}
-p.bundle_runtime(Path(sys.argv[1]), native=Path(sys.argv[2]), bridge=Path(sys.argv[3]), external={"libgame.dylib"}, extra=extra)' \
+p.bundle_runtime(Path(sys.argv[1]), native=Path(sys.argv[2]), bridge=Path(sys.argv[3]), external={"libgame.dylib"}, extra=extra,
+                 engine=Path("work/upstream/xash3d-fwgs/build-dropin").resolve())' \
   "$A/Contents/Resources/Runtime" "$N" "$B" "$DEPS" > /dev/null
 for lib in libogg.0.dylib libvorbis.0.4.9.dylib libvorbisfile.3.3.8.dylib; do   # (the engine links these by name)
   [ -e "$A/Contents/Resources/Runtime/$lib" ] || { cp "$DEPS/lib/$lib" "$A/Contents/Resources/Runtime/"; codesign --force -s - "$A/Contents/Resources/Runtime/$lib" 2>/dev/null; }
 done
-cp work/upstream/xash3d-fwgs/build-client/3rdparty/extras/extras.pk3 "$A/Contents/Resources/extras.pk3"
+cp work/upstream/xash3d-fwgs/build-dropin/3rdparty/extras/extras.pk3 "$A/Contents/Resources/extras.pk3"
 cp "$DEPS/bin/upx" "$A/Contents/Resources/bin/upx"
 O="$ROOT/build/dropin"; rm -rf "${O:?}"; mkdir -p "$O"
 clang -c -arch arm64 -O2 -fobjc-arc -w -I "$S" -o "$O/setup_ui.o" "$S/setup_ui.m"
-swiftc -O -target "arm64-apple-macos$MACOSX_DEPLOYMENT_TARGET" -framework AppKit -framework CoreImage launcher/*.swift "$O/setup_ui.o" -o "$A/Contents/MacOS/$BIN"
+swiftc -O -D DROPIN -target "arm64-apple-macos$MACOSX_DEPLOYMENT_TARGET" -framework AppKit -framework CoreImage launcher/*.swift "$O/setup_ui.o" -o "$A/Contents/MacOS/$BIN"
 sed -e "s|@REPO@|$REPO|; s|@ASSET@|$SLUG.zip|" "$S/update.sh" > "$A/Contents/MacOS/update"; chmod +x "$A/Contents/MacOS/update"
 /usr/libexec/PlistBuddy -c "Add :branch string release" "$A/Contents/Resources/Update.plist" > /dev/null
 printf '{\n  "revision": "%s",\n  "architecture": "arm64",\n  "renderer": "Metal (ANGLE)",\n  "drag_and_drop": true\n}\n' "$TAG" > "$A/Contents/Resources/Build.json"

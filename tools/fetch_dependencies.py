@@ -39,7 +39,7 @@ def apply_patches(engine,patches):
         subprocess.run(['git','apply',str(patch)],cwd=engine,check=True)
 
 
-def stale_lock(engine):
+def stale_lock(engine):   # (BHL_ENGINE_OUT: the client engine's output folder, build-client unless make_dropin.sh's build-dropin)
     """waf reads its directories back from its lock file before configuring: one written through another path to this
     checkout (a symlinked ~/Projects) makes every later build do nothing. Configure writes it again."""
     for lock in engine.glob('.lock-waf_*'):lock.unlink()
@@ -76,7 +76,7 @@ def main():
         from fetch_angle import fetch
         fetch()
         stale_lock(engine)
-        subprocess.run(['./waf','configure','--out=build-client','--disable-werror','--64bits','--enable-soft','--enable-null','--enable-gles3compat','--sdl-use-pkgconfig','--prefix='+str(ROOT/'work/engine-client')],cwd=engine,check=True)
+        subprocess.run(['./waf','configure','--out='+os.environ.get('BHL_ENGINE_OUT','build-client'),'--disable-werror','--64bits','--enable-soft','--enable-null','--enable-gles3compat','--sdl-use-pkgconfig','--prefix='+str(ROOT/'work/engine-client')],cwd=engine,check=True)
         subprocess.run(['./waf','build','-j4'],cwd=engine,check=True)
     print(f'Pinned dependencies ready; verified all {len(imports)} client VGUI imports')
 

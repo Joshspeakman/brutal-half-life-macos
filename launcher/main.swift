@@ -344,6 +344,7 @@ final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 }
 if CommandLine.arguments.dropFirst().first == "--run-engine" { runBundledEngine() }
+#if DROPIN   // (only tools/make_dropin.sh links the setup window: swiftc -D DROPIN)
 /* The drag-and-drop app (tools/make_dropin.sh): its setup window (recomp setup's setup_ui.m, linked in) builds the game from the
  * player's copy first, then says where it is; this process never loads the game (game.json's bound_symbol is ""). */
 @_silgen_name("ds_easy_install") func ds_easy_install(_ exe: UnsafeMutablePointer<UnsafePointer<CChar>?>, _ game: UnsafeMutablePointer<UnsafePointer<CChar>?>,
@@ -356,5 +357,6 @@ if let res = Bundle.main.resourceURL, FileManager.default.fileExists(atPath: res
         setenv("BHL_GAME_LIB", (String(cString: exe) as NSString).deletingLastPathComponent, 1)
     }
 }
+#endif
 let app = NSApplication.shared
 let delegate = Launcher(); app.delegate = delegate; app.run()
